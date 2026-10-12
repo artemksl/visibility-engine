@@ -1,0 +1,8 @@
+{
+  "selected_profile_ids": ["profile_1", "profile_2", "profile_3", "profile_4", "profile_5", "profile_6", "profile_7"],
+  "tabs_per_provider": 2,
+  "packet_start_stagger_seconds": 10,
+  "cdp_url": "http://127.0.0.1:9222",
+  "user_data_dir": "/absolute/path/to/your/automation-chrome"
+}
+

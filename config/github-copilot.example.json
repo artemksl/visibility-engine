@@ -1,0 +1,16 @@
+{
+  "schema_version": "github_copilot.setup.v1",
+  "source": {
+    "account_ref": "my_copilot_account",
+    "github_account_id": "replace_with_account_id",
+    "source_method": "github_copilot_web_v1",
+    "model": "auto",
+    "repetitions": 1,
+    "request_policy_version": "github_copilot.cost_optimized.v1"
+  },
+  "runtime": {
+    "account_ref": "my_copilot_account",
+    "github_account_id": "replace_with_account_id",
+    "credential_ref": "keychain:my-copilot-service:my-account"
+  }
+}

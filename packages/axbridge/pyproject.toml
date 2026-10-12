@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "axbridge"
+version = "0.2.3"
+description = "A macOS accessibility reader and verified PyAutoGUI controller for Chrome"
+requires-python = ">=3.11"
+dependencies = ["atomacos==3.3.0", "PyAutoGUI==0.9.41"]
+
+[project.scripts]
+axbridge = "axbridge.cli:main"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["axbridge*"]
+
+[project.optional-dependencies]
+plots = ["matplotlib>=3.9"]

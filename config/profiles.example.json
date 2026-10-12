@@ -1,0 +1,10 @@
+[
+  {"id":"profile_1","display_name":"Account 1","chrome_directory":"Profile 1","project_url":""},
+  {"id":"profile_2","display_name":"Account 2","chrome_directory":"Profile 2","project_url":""},
+  {"id":"profile_3","display_name":"Account 3","chrome_directory":"Profile 3","project_url":""},
+  {"id":"profile_4","display_name":"Account 4","chrome_directory":"Profile 4","project_url":""},
+  {"id":"profile_5","display_name":"Account 5","chrome_directory":"Profile 5","project_url":""},
+  {"id":"profile_6","display_name":"Account 6","chrome_directory":"Profile 6","project_url":""},
+  {"id":"profile_7","display_name":"Account 7","chrome_directory":"Profile 7","project_url":""}
+]
+

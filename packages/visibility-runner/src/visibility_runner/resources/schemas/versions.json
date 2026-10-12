@@ -1,0 +1,13 @@
+{
+  "event": "visibility_runner.event.v1",
+  "fence": "visibility_runner.send_fence.v1",
+  "gaio_extraction_evidence": "free_snapshot.gaio_gemini_name_extraction.v1",
+  "observation_result": "visibility_runner.observation_result.v1",
+  "packet": "visibility_runner.packet.v1",
+  "packet_state": "visibility_runner.packet_state.v1",
+  "plan": "visibility_runner.run_plan.v1",
+  "runner_state": "visibility_runner.runner_state.v1",
+  "same_chat_evidence": "free_snapshot.same_chat_name_extraction.v1",
+  "worker_request": "visibility_runner.worker_request.v1",
+  "worker_result": "visibility_runner.worker_result.v1"
+}

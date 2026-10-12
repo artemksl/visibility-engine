@@ -1,0 +1,29 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+node_modules/
+.DS_Store
+.env
+.env.*
+*.pem
+*.key
+config/*.json
+!config/*.example.json
+config/routine task profiles/
+data/
+logs/
+tmp/
+output/
+audit-results/
+.ruff_cache/
+*.sqlite3*
+*.db
+*.log
+Walkthrough Captures/
+

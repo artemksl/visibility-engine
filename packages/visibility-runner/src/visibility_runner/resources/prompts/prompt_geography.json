@@ -1,0 +1,18 @@
+{
+  "schema_version": "free_snapshot.prompt_geography.v1",
+  "version": "prompt-geography-london-2026-07-v1",
+  "status": "active",
+  "purpose": "Patient-facing geography choices used only to render and report Free Snapshot prompts.",
+  "assignment_rule": "A founder must select and confirm the greater-area target for every selected local area. The workflow never derives this choice from quota territories.",
+  "independent_from": "data/area-tagging/territory_taxonomy.json",
+  "greater_areas": [
+    {"id": "central-london", "name": "Central London"},
+    {"id": "north-london", "name": "North London"},
+    {"id": "west-london", "name": "West London"},
+    {"id": "east-london", "name": "East London"},
+    {"id": "south-london", "name": "South London"}
+  ],
+  "cities": [
+    {"id": "london", "name": "London", "country_code": "GB"}
+  ]
+}

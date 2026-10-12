@@ -1,0 +1,395 @@
+{
+  "schema_version": "free_snapshot.prompt_content_spec.v1",
+  "catalog_version": "snapshot-prompts-v4-content-2026-07-17",
+  "status": "final_content_spec",
+  "runtime_enabled": false,
+  "generation_method": "fixed_editorial_synthesis_of_cited_public_query_language",
+  "created_at": "2026-07-17",
+  "research_version": "prompt-language-research-2026-07-17",
+  "content_sha256": "caf84efc1f217f8eefae2fd28b6cb91d27f860a24b089847bdd27978159190ab",
+  "platforms": [
+    "chatgpt",
+    "gemini",
+    "copilot",
+    "google_ai_overview"
+  ],
+  "scoring": {
+    "scale": "1-5 ordinal naturalness score",
+    "5": "Closely reflects observed public user language, has one clear intent, and fits the platform surface.",
+    "4": "Natural fixed editorial synthesis supported by observed themes, with minor construction or combined criteria.",
+    "3": "Plausible but noticeably designed for research or weakly evidenced.",
+    "2": "Formal, stacked, or unlike an ordinary request.",
+    "1": "Implausible as a real user request.",
+    "acceptance_floor": 4,
+    "slot_score_rule": "The semantic slot score is the lowest score among its four platform renderings."
+  },
+  "rendering_policy": {
+    "semantic_equivalence_required": true,
+    "fresh_conversation_or_search_required": true,
+    "client_brand_forbidden": true,
+    "dynamic_generation_forbidden": true,
+    "notes": [
+      "ChatGPT, Gemini, and Copilot use conservative conversational variations; no unsupported platform dialect is invented.",
+      "Google AI Overview deliberately mixes concise searches and full questions because current official guidance says users ask both conventional and longer complex queries.",
+      "A platform rendering may change syntax but may not add or remove a decision criterion from its semantic slot."
+    ]
+  },
+  "baskets": [
+    {
+      "id": "treatment_local",
+      "label": "Treatment in the local area",
+      "slot_count": 7,
+      "multiplication_rule": "once per selected treatment and local area"
+    },
+    {
+      "id": "treatment_expanded",
+      "label": "Treatment across the wider market",
+      "slot_count": 7,
+      "multiplication_rule": "four greater-area slots and three city slots per selected treatment, deduplicated by treatment and target geography"
+    },
+    {
+      "id": "clinic_archetype",
+      "label": "General clinic-archetype discovery",
+      "slot_count": 7,
+      "multiplication_rule": "three local slots, two greater-area slots, and two city slots per clinic archetype; never multiplied by treatment"
+    }
+  ],
+  "slots": [
+    {
+      "id": "TL01",
+      "basket_id": "treatment_local",
+      "sequence": 1,
+      "semantic_intent": "direct_discovery",
+      "subject_kind": "treatment",
+      "geography_level": "local",
+      "evidence_refs": ["R01", "R03", "R09"],
+      "naturalness_score": 5,
+      "renderings": {
+        "chatgpt": {"text": "What are the best clinics for {treatment} in {local_area}?", "naturalness_score": 5},
+        "gemini": {"text": "Which clinics are best for {treatment} in {local_area}?", "naturalness_score": 5},
+        "copilot": {"text": "Recommend good clinics for {treatment} in {local_area}.", "naturalness_score": 5},
+        "google_ai_overview": {"text": "best {treatment} clinics {local_area}", "naturalness_score": 5}
+      }
+    },
+    {
+      "id": "TL02",
+      "basket_id": "treatment_local",
+      "sequence": 2,
+      "semantic_intent": "nearby_recommendation",
+      "subject_kind": "treatment",
+      "geography_level": "local",
+      "evidence_refs": ["R01", "R09"],
+      "naturalness_score": 5,
+      "renderings": {
+        "chatgpt": {"text": "I'm looking for {treatment} near {station_or_area}. Which clinics would you recommend?", "naturalness_score": 5},
+        "gemini": {"text": "Can you recommend good clinics for {treatment} near {station_or_area}?", "naturalness_score": 5},
+        "copilot": {"text": "Find good clinics for {treatment} near {station_or_area}.", "naturalness_score": 5},
+        "google_ai_overview": {"text": "recommended {treatment} clinic near {station_or_area}", "naturalness_score": 5}
+      }
+    },
+    {
+      "id": "TL03",
+      "basket_id": "treatment_local",
+      "sequence": 3,
+      "semantic_intent": "reviews_reputation",
+      "subject_kind": "treatment",
+      "geography_level": "local",
+      "evidence_refs": ["R02", "R03"],
+      "naturalness_score": 5,
+      "renderings": {
+        "chatgpt": {"text": "Which clinics around {postcode_or_area} are well reviewed for {treatment}?", "naturalness_score": 5},
+        "gemini": {"text": "What are the best-reviewed clinics for {treatment} around {postcode_or_area}?", "naturalness_score": 5},
+        "copilot": {"text": "Find well-reviewed clinics for {treatment} around {postcode_or_area}.", "naturalness_score": 5},
+        "google_ai_overview": {"text": "best reviewed {treatment} clinics {postcode_or_area}", "naturalness_score": 5}
+      }
+    },
+    {
+      "id": "TL04",
+      "basket_id": "treatment_local",
+      "sequence": 4,
+      "semantic_intent": "practitioner_qualifications",
+      "subject_kind": "treatment",
+      "geography_level": "local",
+      "evidence_refs": ["R02", "R05", "R09"],
+      "naturalness_score": 4,
+      "renderings": {
+        "chatgpt": {"text": "Where in {local_area} can I get {treatment} from an experienced, properly qualified practitioner?", "naturalness_score": 4},
+        "gemini": {"text": "Which clinics in {local_area} have experienced, properly qualified practitioners for {treatment}?", "naturalness_score": 4},
+        "copilot": {"text": "Find clinics in {local_area} with experienced, properly qualified practitioners for {treatment}.", "naturalness_score": 4},
+        "google_ai_overview": {"text": "qualified experienced {treatment} practitioner {local_area}", "naturalness_score": 4}
+      }
+    },
+    {
+      "id": "TL05",
+      "basket_id": "treatment_local",
+      "sequence": 5,
+      "semantic_intent": "first_time_consultation",
+      "subject_kind": "treatment",
+      "geography_level": "local",
+      "evidence_refs": ["R04", "R06", "R09"],
+      "naturalness_score": 5,
+      "renderings": {
+        "chatgpt": {"text": "I'm considering {treatment} for the first time. Which clinics near {local_area} are good for an initial consultation?", "naturalness_score": 5},
+        "gemini": {"text": "Which clinics near {local_area} are good for a first {treatment} consultation?", "naturalness_score": 5},
+        "copilot": {"text": "Recommend clinics near {local_area} for someone booking a first {treatment} consultation.", "naturalness_score": 5},
+        "google_ai_overview": {"text": "I'm considering {treatment} for the first time. Which clinics in {local_area} are good for an initial consultation?", "naturalness_score": 5}
+      }
+    },
+    {
+      "id": "TL06",
+      "basket_id": "treatment_local",
+      "sequence": 6,
+      "semantic_intent": "price_value",
+      "subject_kind": "treatment",
+      "geography_level": "local",
+      "evidence_refs": ["R01", "R02", "R06", "R08", "R10"],
+      "naturalness_score": 5,
+      "renderings": {
+        "chatgpt": {"text": "Which good clinics around {local_area} offer {treatment}, and what do they typically charge?", "naturalness_score": 5},
+        "gemini": {"text": "Compare good clinics for {treatment} around {local_area}, including typical prices.", "naturalness_score": 5},
+        "copilot": {"text": "Compare reputable {treatment} clinics around {local_area} and their typical prices.", "naturalness_score": 5},
+        "google_ai_overview": {"text": "What do good {treatment} clinics in {local_area} typically charge?", "naturalness_score": 5}
+      }
+    },
+    {
+      "id": "TL07",
+      "basket_id": "treatment_local",
+      "sequence": 7,
+      "semantic_intent": "results_aftercare",
+      "subject_kind": "treatment",
+      "geography_level": "local",
+      "evidence_refs": ["R02", "R03", "R04", "R07", "R09"],
+      "naturalness_score": 4,
+      "renderings": {
+        "chatgpt": {"text": "Which clinics near {local_area} are known for good {treatment} results and aftercare?", "naturalness_score": 4},
+        "gemini": {"text": "Which {local_area} clinics have a good reputation for {treatment} results and aftercare?", "naturalness_score": 4},
+        "copilot": {"text": "Find clinics near {local_area} known for good {treatment} results and aftercare.", "naturalness_score": 4},
+        "google_ai_overview": {"text": "Which clinics in {local_area} are known for good {treatment} results and aftercare?", "naturalness_score": 4}
+      }
+    },
+    {
+      "id": "TE01",
+      "basket_id": "treatment_expanded",
+      "sequence": 1,
+      "semantic_intent": "greater_area_discovery",
+      "subject_kind": "treatment",
+      "geography_level": "greater_area",
+      "evidence_refs": ["R01", "R06", "R07"],
+      "naturalness_score": 5,
+      "renderings": {
+        "chatgpt": {"text": "What are the best clinics for {treatment} in {greater_area}?", "naturalness_score": 5},
+        "gemini": {"text": "Which clinics are best for {treatment} across {greater_area}?", "naturalness_score": 5},
+        "copilot": {"text": "Recommend good clinics for {treatment} in {greater_area}.", "naturalness_score": 5},
+        "google_ai_overview": {"text": "best {treatment} clinics {greater_area}", "naturalness_score": 5}
+      }
+    },
+    {
+      "id": "TE02",
+      "basket_id": "treatment_expanded",
+      "sequence": 2,
+      "semantic_intent": "greater_area_willingness_to_travel",
+      "subject_kind": "treatment",
+      "geography_level": "greater_area",
+      "evidence_refs": ["R01", "R06", "R08"],
+      "naturalness_score": 5,
+      "renderings": {
+        "chatgpt": {"text": "I'm happy to travel within {greater_area} for {treatment}. Which clinics are worth considering?", "naturalness_score": 5},
+        "gemini": {"text": "Which {treatment} clinics are worth travelling to within {greater_area}?", "naturalness_score": 5},
+        "copilot": {"text": "Recommend {treatment} clinics worth travelling to within {greater_area}.", "naturalness_score": 5},
+        "google_ai_overview": {"text": "Which {treatment} clinics are worth travelling to in {greater_area}?", "naturalness_score": 5}
+      }
+    },
+    {
+      "id": "TE03",
+      "basket_id": "treatment_expanded",
+      "sequence": 3,
+      "semantic_intent": "greater_area_patient_reputation",
+      "subject_kind": "treatment",
+      "geography_level": "greater_area",
+      "evidence_refs": ["R02", "R03", "R07"],
+      "naturalness_score": 5,
+      "renderings": {
+        "chatgpt": {"text": "Which clinics in {greater_area} have the strongest patient reviews for {treatment}?", "naturalness_score": 5},
+        "gemini": {"text": "What are the best-reviewed {treatment} clinics in {greater_area}?", "naturalness_score": 5},
+        "copilot": {"text": "Find the best-reviewed clinics for {treatment} across {greater_area}.", "naturalness_score": 5},
+        "google_ai_overview": {"text": "best reviewed {treatment} clinics {greater_area}", "naturalness_score": 5}
+      }
+    },
+    {
+      "id": "TE04",
+      "basket_id": "treatment_expanded",
+      "sequence": 4,
+      "semantic_intent": "greater_area_practical_comparison",
+      "subject_kind": "treatment",
+      "geography_level": "greater_area",
+      "evidence_refs": ["R02", "R05", "R08"],
+      "naturalness_score": 4,
+      "renderings": {
+        "chatgpt": {"text": "Can you compare reputable clinics for {treatment} across {greater_area}, including practitioner experience and typical prices?", "naturalness_score": 4},
+        "gemini": {"text": "Compare reputable {treatment} clinics in {greater_area} by practitioner experience and typical price.", "naturalness_score": 4},
+        "copilot": {"text": "Compare reputable clinics for {treatment} in {greater_area}, focusing on practitioner experience and typical prices.", "naturalness_score": 4},
+        "google_ai_overview": {"text": "How do reputable {treatment} clinics in {greater_area} compare on practitioner experience and price?", "naturalness_score": 4}
+      }
+    },
+    {
+      "id": "TE05",
+      "basket_id": "treatment_expanded",
+      "sequence": 5,
+      "semantic_intent": "citywide_discovery",
+      "subject_kind": "treatment",
+      "geography_level": "city",
+      "evidence_refs": ["R02", "R03", "R06", "R09", "R10"],
+      "naturalness_score": 5,
+      "renderings": {
+        "chatgpt": {"text": "What are the best clinics in {city} for {treatment}?", "naturalness_score": 5},
+        "gemini": {"text": "Which clinics are best for {treatment} across {city}?", "naturalness_score": 5},
+        "copilot": {"text": "Recommend the best clinics in {city} for {treatment}.", "naturalness_score": 5},
+        "google_ai_overview": {"text": "best {treatment} clinics {city}", "naturalness_score": 5}
+      }
+    },
+    {
+      "id": "TE06",
+      "basket_id": "treatment_expanded",
+      "sequence": 6,
+      "semantic_intent": "citywide_treatment_expertise",
+      "subject_kind": "treatment",
+      "geography_level": "city",
+      "evidence_refs": ["R02", "R05", "R09"],
+      "naturalness_score": 4,
+      "renderings": {
+        "chatgpt": {"text": "Which clinics in {city} are especially experienced in {treatment}?", "naturalness_score": 4},
+        "gemini": {"text": "Which {city} clinics have the most experience with {treatment}?", "naturalness_score": 4},
+        "copilot": {"text": "Find clinics in {city} with strong practitioner experience in {treatment}.", "naturalness_score": 4},
+        "google_ai_overview": {"text": "most experienced {treatment} clinics {city}", "naturalness_score": 4}
+      }
+    },
+    {
+      "id": "TE07",
+      "basket_id": "treatment_expanded",
+      "sequence": 7,
+      "semantic_intent": "citywide_destination_clinic",
+      "subject_kind": "treatment",
+      "geography_level": "city",
+      "evidence_refs": ["R01", "R06", "R08"],
+      "naturalness_score": 5,
+      "renderings": {
+        "chatgpt": {"text": "If I can travel anywhere in {city} for {treatment}, which clinics are worth the trip?", "naturalness_score": 5},
+        "gemini": {"text": "Which {treatment} clinics are worth travelling across {city} for?", "naturalness_score": 5},
+        "copilot": {"text": "Recommend {treatment} clinics that are worth travelling across {city} for.", "naturalness_score": 5},
+        "google_ai_overview": {"text": "Which {treatment} clinics are worth travelling across {city} for?", "naturalness_score": 5}
+      }
+    },
+    {
+      "id": "CP01",
+      "basket_id": "clinic_archetype",
+      "sequence": 1,
+      "semantic_intent": "local_archetype_discovery",
+      "subject_kind": "clinic_archetype",
+      "geography_level": "local",
+      "evidence_refs": ["R04", "R05", "R07"],
+      "naturalness_score": 5,
+      "renderings": {
+        "chatgpt": {"text": "What are the best {clinic_archetype_plural} in {local_area}?", "naturalness_score": 5},
+        "gemini": {"text": "Which {clinic_archetype_plural} are best in {local_area}?", "naturalness_score": 5},
+        "copilot": {"text": "Recommend good {clinic_archetype_plural} in {local_area}.", "naturalness_score": 5},
+        "google_ai_overview": {"text": "best {clinic_archetype_plural} {local_area}", "naturalness_score": 5}
+      }
+    },
+    {
+      "id": "CP02",
+      "basket_id": "clinic_archetype",
+      "sequence": 2,
+      "semantic_intent": "local_archetype_recommendation",
+      "subject_kind": "clinic_archetype",
+      "geography_level": "local",
+      "evidence_refs": ["R04", "R05"],
+      "naturalness_score": 5,
+      "renderings": {
+        "chatgpt": {"text": "Can you recommend a good {clinic_archetype_singular} near {local_area}?", "naturalness_score": 5},
+        "gemini": {"text": "What is a good {clinic_archetype_singular} near {local_area}?", "naturalness_score": 5},
+        "copilot": {"text": "Find a good {clinic_archetype_singular} near {local_area}.", "naturalness_score": 5},
+        "google_ai_overview": {"text": "recommended {clinic_archetype_singular} near {local_area}", "naturalness_score": 5}
+      }
+    },
+    {
+      "id": "CP03",
+      "basket_id": "clinic_archetype",
+      "sequence": 3,
+      "semantic_intent": "local_personalised_consultation",
+      "subject_kind": "clinic_archetype",
+      "geography_level": "local",
+      "evidence_refs": ["R04", "R05", "R07"],
+      "naturalness_score": 4,
+      "renderings": {
+        "chatgpt": {"text": "Which {clinic_archetype_plural} in {local_area} offer thorough, personalised consultations without a hard sell?", "naturalness_score": 4},
+        "gemini": {"text": "Which {clinic_archetype_plural} in {local_area} are known for personalised consultations without pushy sales?", "naturalness_score": 4},
+        "copilot": {"text": "Find {clinic_archetype_plural} in {local_area} known for personalised consultations without pushy sales.", "naturalness_score": 4},
+        "google_ai_overview": {"text": "Which {clinic_archetype_plural} in {local_area} offer personalised consultations without a hard sell?", "naturalness_score": 4}
+      }
+    },
+    {
+      "id": "CP04",
+      "basket_id": "clinic_archetype",
+      "sequence": 4,
+      "semantic_intent": "greater_area_archetype_reputation",
+      "subject_kind": "clinic_archetype",
+      "geography_level": "greater_area",
+      "evidence_refs": ["R04", "R05", "R07"],
+      "naturalness_score": 5,
+      "renderings": {
+        "chatgpt": {"text": "What are the best-regarded {clinic_archetype_plural} in {greater_area}?", "naturalness_score": 5},
+        "gemini": {"text": "Which {clinic_archetype_plural} have the best reputation in {greater_area}?", "naturalness_score": 5},
+        "copilot": {"text": "Find the best-regarded {clinic_archetype_plural} in {greater_area}.", "naturalness_score": 5},
+        "google_ai_overview": {"text": "best rated {clinic_archetype_plural} {greater_area}", "naturalness_score": 5}
+      }
+    },
+    {
+      "id": "CP05",
+      "basket_id": "clinic_archetype",
+      "sequence": 5,
+      "semantic_intent": "greater_area_trusted_destination",
+      "subject_kind": "clinic_archetype",
+      "geography_level": "greater_area",
+      "evidence_refs": ["R01", "R05", "R06", "R08"],
+      "naturalness_score": 5,
+      "renderings": {
+        "chatgpt": {"text": "I'm willing to travel within {greater_area} for a trustworthy {clinic_archetype_singular}. Which ones stand out?", "naturalness_score": 5},
+        "gemini": {"text": "Which trustworthy {clinic_archetype_plural} are worth travelling to in {greater_area}?", "naturalness_score": 5},
+        "copilot": {"text": "Recommend trustworthy {clinic_archetype_plural} worth travelling to within {greater_area}.", "naturalness_score": 5},
+        "google_ai_overview": {"text": "Which trusted {clinic_archetype_plural} are worth travelling to in {greater_area}?", "naturalness_score": 5}
+      }
+    },
+    {
+      "id": "CP06",
+      "basket_id": "clinic_archetype",
+      "sequence": 6,
+      "semantic_intent": "citywide_archetype_shortlist",
+      "subject_kind": "clinic_archetype",
+      "geography_level": "city",
+      "evidence_refs": ["R04", "R05", "R07"],
+      "naturalness_score": 5,
+      "renderings": {
+        "chatgpt": {"text": "Which {clinic_archetype_plural} in {city} would you shortlist?", "naturalness_score": 5},
+        "gemini": {"text": "What are the best {clinic_archetype_plural} to consider across {city}?", "naturalness_score": 5},
+        "copilot": {"text": "Give me a shortlist of good {clinic_archetype_plural} in {city}.", "naturalness_score": 5},
+        "google_ai_overview": {"text": "best {clinic_archetype_plural} {city}", "naturalness_score": 5}
+      }
+    },
+    {
+      "id": "CP07",
+      "basket_id": "clinic_archetype",
+      "sequence": 7,
+      "semantic_intent": "citywide_personalised_care",
+      "subject_kind": "clinic_archetype",
+      "geography_level": "city",
+      "evidence_refs": ["R04", "R05", "R07"],
+      "naturalness_score": 4,
+      "renderings": {
+        "chatgpt": {"text": "Which {clinic_archetype_plural} in {city} offer a good range of treatments and take time to understand what clients need?", "naturalness_score": 4},
+        "gemini": {"text": "Which {clinic_archetype_plural} in {city} are known for a broad treatment range and personalised advice?", "naturalness_score": 4},
+        "copilot": {"text": "Find {clinic_archetype_plural} in {city} known for a broad treatment range and personalised advice.", "naturalness_score": 4},
+        "google_ai_overview": {"text": "Which {clinic_archetype_plural} in {city} offer personalised advice and a good range of treatments?", "naturalness_score": 4}
+      }
+    }
+  ]
+}

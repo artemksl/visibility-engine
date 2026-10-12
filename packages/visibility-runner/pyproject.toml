@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "visibility-runner"
+version = "0.2.55"
+description = "Visibility measurements for ChatGPT, Gemini, Copilot and GitHub Copilot SDK"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "workspace-automation-core==0.1.2",
+    "playwright>=1.40,<2",
+    "psutil>=7,<8",
+]
+
+[project.optional-dependencies]
+desktop = ["axbridge==0.2.3; sys_platform == 'darwin'"]
+browser-driver-experiment = ["patchright==1.63.0"]
+test = [
+    "pytest>=8,<10",
+    "coverage>=7.6,<8",
+    "playwright>=1.48,<2",
+    "tomli>=2; python_version < '3.11'",
+]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"visibility_runner" = [
+    "resources/prompts/*.json",
+    "resources/schemas/*.json",
+    "providers/copilot_worker/worker.mjs",
+    "providers/copilot_worker/package.json",
+    "providers/copilot_worker/package-lock.json",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "native_process: real child process/ownership tests",
+    "native_storage: native durability and resource limits",
+    "package: built and installed wheel acceptance",
+    "model_extended: explicitly bounded extended model exploration",
+    "performance: reproducible engine scale/resource checks",
+    "local_browser: isolated synthetic DOM/CDP tests; no provider traffic or saved profiles",
+]
