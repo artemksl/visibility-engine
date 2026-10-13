@@ -63,8 +63,14 @@ behavior. No live provider run was performed for this portability change.
 The final installed-package selection passed 219 checks. The public setup command
 passed with tests, desktop verification and the optional SDK enabled. An isolated
 HTTP check served the installed panel and assets using temporary state. A macOS
-and Windows CI matrix runs the same offline selection; Windows execution has not
-yet been observed here. Desktop-binding tests require the optional desktop extra.
+and Windows CI matrix runs the same offline selection. The
+[first public CI run](https://github.com/artemksl/visibility-engine/actions/runs/38462367145)
+passed on macOS. Windows installation passed, but its offline selection reported
+8 failures, 210 passes and 1 skip: the private-resource checks rejected newly
+created files or directories because their owner SID differed from the current
+user SID. This Windows ownership issue needs repair and native verification;
+installation alone is not Windows qualification. Desktop-binding tests require
+the optional desktop extra.
 
 Before claiming Windows live parity, on an actual Windows machine:
 
@@ -81,5 +87,5 @@ Before claiming Windows live parity, on an actual Windows machine:
    behavior using authorized measurements. Retain the evidence; do not treat
    installation success as provider availability or live qualification.
 
-Windows native tests and live qualification remain pending because development
-and the current regression run took place on macOS.
+Windows native offline acceptance is blocked by the ownership failures above.
+Live Chrome and desktop qualification remain pending.

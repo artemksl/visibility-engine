@@ -1,6 +1,7 @@
 # Instructions for an installing or maintaining agent
 
-Read `INSTALL.md`, then inspect the target machine before changing configuration.
+Read `INSTALL.md` and [the Chrome profile connection guide](docs/chrome-profiles.md),
+then inspect the target machine before changing configuration.
 Install this checkout with `./setup.sh` on macOS or `setup.cmd` on Windows; do not search for another private runner
 wheel or depend on directories from the original developer's computer.
 

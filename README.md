@@ -27,7 +27,8 @@ On Windows, run `setup.cmd --with-tests`, then `run.cmd`. Read
 
 Open <http://127.0.0.1:8766/visibility-testing>. To choose another port, use
 `./run.sh --port 8767`. Opening the panel and using Preview do not send prompts.
-Configure your own signed-in Chrome profiles before starting measurements.
+Follow [Connect Chrome profiles to the engine](docs/chrome-profiles.md) to
+configure your own signed-in profiles before starting measurements.
 
 Follow [INSTALL.md](INSTALL.md) for configuration, optional providers, verification
 and troubleshooting. An installing agent should read [AGENTS.md](AGENTS.md) first.

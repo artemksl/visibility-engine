@@ -75,32 +75,15 @@ require Node.js.
 
 ## 3. Configure your own Chrome profiles
 
-Create a dedicated Chrome user-data directory for automation. Open that directory
-manually, create the desired profiles, and sign in to the intended providers.
-Use `chrome://version` in each profile to find its exact Profile Path. The final
-component, such as `Default` or `Profile 1`, is its `chrome_directory`.
+Follow [Connect Chrome profiles to the engine](docs/chrome-profiles.md) for the
+macOS and Windows commands, manual provider sign-in, exact Profile Path mapping
+and complete JSON examples. Use a dedicated non-default Chrome user-data folder.
+The guide also covers reusing an existing automation folder.
 
-Copy the examples to ignored local files:
-
-```bash
-cp config/profiles.example.json config/profiles.json
-cp config/settings.example.json config/settings.json
-```
-
-In PowerShell use `Copy-Item` instead of `cp` if needed. Supply a Windows absolute
-`user_data_dir`, such as `C:\\VisibilityChrome`; JSON backslashes must be escaped.
-Chrome is discovered from its standard installation or the explicit local
-`BROWSER_CMD` override. Profile bindings and selection work identically.
-
-Replace the fictional rows with actual profile bindings. Each ID and Chrome
-directory must be unique. IDs are local stable labels; display names may be
-human-readable. `project_url` may be empty. No real account mapping is shipped.
-
-In `settings.json`, provide a nonempty explicit `selected_profile_ids` list and
-set `user_data_dir` to the absolute path of your automation Chrome directory.
-Every selected ID must exist in `profiles.json`. The example's placeholder path
-is not a usable directory. The default example selects seven profiles with two
-owned tabs per platform per profile, a ten-second stagger, and the existing
+Register exact folder bindings in local `config/profiles.json`; set their
+nonempty explicit IDs and shared root folder in local `config/settings.json`.
+No real account mapping is shipped. The default example selects seven fictional
+profiles with two owned tabs per platform per profile, a ten-second stagger, and the existing
 240-second response deadlines plus 30-second grace. Counts are total observations
 distributed across profiles; they are not multiplied by the number of profiles.
 

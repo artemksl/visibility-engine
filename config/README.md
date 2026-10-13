@@ -1,7 +1,8 @@
 # Local browser configuration
 
 Only fictional `.example.json` files are tracked. Copy and edit them as described
-in `../INSTALL.md`; actual `.json` files and `.env` are ignored. Do not copy a
+in [the Chrome profile connection guide](../docs/chrome-profiles.md); actual
+`.json` files and `.env` are ignored. Do not copy a
 Chrome user-data directory, account session or token into this repository.
 
 `profiles.json` contains exact Chrome directory bindings. `settings.json` chooses
