@@ -2,11 +2,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync,
-  readFileSync, renameSync, statSync, unlinkSync, writeFileSync,
+  readFileSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
+import { publishComplete, terminateOwnedGroup } from "./platform_io.mjs";
 
 export const SDK_VERSION = "1.0.13";
 export const RUNTIME_VERSION = "1.0.83";
@@ -100,9 +101,7 @@ function atomicJson(path, value) {
   const temporary = `${path}.${process.pid}.tmp`;
   const fd = openSync(temporary, "w", 0o600);
   try { writeFileSync(fd, JSON.stringify(value)); fsyncSync(fd); } finally { closeSync(fd); }
-  renameSync(temporary, path);
-  const parent = openSync(dirname(path), "r");
-  try { fsyncSync(parent); } finally { closeSync(parent); }
+  publishComplete(temporary, path);
 }
 const loadJson = (path) => JSON.parse(readFileSync(path, "utf8"));
 const utc = () => new Date().toISOString();
@@ -722,7 +721,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   // target an unrelated Copilot instance. Without an owned group, ESRCH is safe.
   process.stdin.once("end", () => {
     setTimeout(() => {
-      try { process.kill(-process.pid, "SIGKILL"); } catch { process.exit(1); }
+      try { terminateOwnedGroup(process.pid); } catch { process.exit(1); }
     }, 6000).unref();
   });
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.once(signal, () => { void shutdown().finally(() => process.exit(0)); });

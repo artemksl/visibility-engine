@@ -10,7 +10,7 @@ CDP endpoint and tab concurrency. There is no empty-selection or all-profile
 fallback. The examples show seven accounts; use the owner's intended bindings.
 An ID is a stable local label, separate from Chrome's `Profile 1` directory name.
 
-The included launcher supports macOS and resolves files relative to this folder.
+The included launcher supports macOS and Windows and resolves files relative to this folder.
 A local ignored `.env` may override `BROWSER_CMD` when Chrome is installed at a
 different path. The selected manifest, user-data directory and CDP URL are frozen
 in each worker request; changing local settings does not rewrite saved jobs.
@@ -36,7 +36,7 @@ outside this mechanism.
 ## GitHub Copilot with Gemini parsing
 
 This is a separate source provider, requiring Node.js 22.12+, an eligible Copilot
-account, its explicit account identity and an existing macOS Keychain credential.
+account, its explicit account identity and an explicitly named OS credential.
 The engine verifies eligibility before model work. Run
 `./setup.sh --github-copilot`, then copy and edit:
 
@@ -46,7 +46,9 @@ cp config/github-copilot.example.json config/github-copilot.json
 
 Set both source and runtime account fields to the same intended account. Set
 `credential_ref` to `keychain:<service>:<account>` for an existing authorized
-Keychain entry. The example is a locator, not a credential. Do not replace it
+Keychain entry on macOS, or `credential-manager:<target>` for an existing generic
+Windows Credential Manager entry. The engine reads that exact target only.
+The example is a locator, not a credential. Do not replace it
 with a token or commit real credential material. Credential resolution happens
 only within authorized execution; Preview never fetches it. The source answer
 is retained while Gemini performs source-bound parsing and parser recovery.

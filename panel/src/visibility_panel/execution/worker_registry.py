@@ -6,14 +6,16 @@ browser resources are inferred here. Losing a heartbeat never grants admission.
 from __future__ import annotations
 
 import contextlib
-import fcntl
+from platform_runtime import file_locks as fcntl
+from platform_runtime.processes import (
+    boot_identity, process_is_current_user, signal_process as platform_signal_process,
+)
+from platform_runtime.storage import publish_complete, sync_file
 import hashlib
 import json
 import math
 import os
 import signal
-import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -37,11 +39,7 @@ def digest(value: object) -> str:
 
 
 def _sync(fd: int, *, full: bool = True) -> None:
-    os.fsync(fd)
-    if full and sys.platform == "darwin":
-        # fsync alone may leave drive caches pending on macOS. A failed full
-        # flush must reach the caller before any external effect is admitted.
-        fcntl.fcntl(fd, 51)  # F_FULLFSYNC
+    sync_file(fd, full=full)
 
 
 def publish_json(path: Path, value: object, *, replace: bool = False, durable: bool = True) -> None:
@@ -56,16 +54,7 @@ def publish_json(path: Path, value: object, *, replace: bool = False, durable: b
             stream.flush()
             if durable:
                 _sync(stream.fileno())
-        if replace:
-            os.replace(temporary, path)
-        else:
-            os.link(temporary, path)  # atomic no-overwrite publication
-        if durable:
-            directory = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+        publish_complete(temporary, path, exclusive=not replace, durable=durable)
     finally:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(temporary)
@@ -85,16 +74,6 @@ def read_record(path: Path, *, optional: bool = False) -> dict | None:
     return value
 
 
-def boot_identity() -> str | None:
-    try:
-        if sys.platform.startswith("linux"):
-            return Path("/proc/sys/kernel/random/boot_id").read_text().strip() or None
-        if sys.platform == "darwin":
-            result = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"], capture_output=True, text=True, timeout=2, check=True)
-            return "boot-session:" + result.stdout.strip() if result.stdout.strip() else None
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return None
 
 
 @dataclass(frozen=True)
@@ -176,14 +155,13 @@ authorization is created by this read-only process inventory.
         deadline = time.monotonic() + timeout
         unknown = False
         matches = []
-        for process in psutil.process_iter(["pid", "exe", "cmdline", "uids"], ad_value=None):
+        for process in psutil.process_iter(["pid", "exe", "cmdline"], ad_value=None):
             if time.monotonic() > deadline:
                 return {"state": "unknown", "reason": "legacy_process_discovery_deadline"}
             information = process.info
             if information["pid"] == exclude_pid:
                 continue
-            uids = information.get("uids")
-            if uids is not None and uids.real != os.getuid():
+            if not process_is_current_user(process):
                 continue
             executable, arguments = information.get("exe"), information.get("cmdline")
             if executable and os.path.realpath(executable) != expected_exe:
@@ -236,11 +214,13 @@ class WorkerRegistry:
         self.root.mkdir(parents=True, exist_ok=True)
         # The inode is permanent. A process crash releases only the kernel lock.
         fd = os.open(self.root / ".launch.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        acquired = False
         try:
             deadline = time.monotonic() + timeout
             while True:
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
                     break
                 except BlockingIOError:
                     if time.monotonic() >= deadline:
@@ -250,7 +230,11 @@ class WorkerRegistry:
             yield
         finally:
             self._launch_local.held = False
-            os.close(fd)
+            try:
+                if acquired:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
 
     def requests(self) -> tuple[dict, ...]:
         if not self.root.exists():
@@ -497,7 +481,7 @@ class WorkerRegistry:
                 age = (time.monotonic() if now is None else now) - float(heartbeat["monotonic"])
                 if age > 20 or age < 0:
                     state = "unresponsive"
-            return {"state": state, "process_state": status, "execution_id": execution_id, "sampled_at": observed_at, "pid": expected.pid, "heartbeat": heartbeat, "completion": completion, "result_available": result_available, "observed_returncode": observed_exit.get("returncode") if observed_exit else None}
+            return {"state": state, "process_state": status, "execution_id": execution_id, "sampled_at": observed_at, "pid": expected.pid, "identity": asdict(expected), "heartbeat": heartbeat, "completion": completion, "result_available": result_available, "observed_returncode": observed_exit.get("returncode") if observed_exit else None}
         except (RegistryError, TypeError, ValueError, KeyError):
             return {"state": "unknown", "reason": "worker_records_or_identity_unavailable", "execution_id": execution_id, "sampled_at": observed_at}
 
@@ -552,9 +536,14 @@ class Heartbeat:
         self._thread.join(timeout=max(self.interval, 1))
 
 
+def _signal_worker(pid: int, number: int, *, expected_created=None, expected_executable=None) -> None:
+    platform_signal_process(pid, force=number == getattr(signal, "SIGKILL", 9),
+                            expected_created=expected_created, expected_executable=expected_executable)
+
+
 class WorkerWatchdog:
     """Bounded containment of a verified worker with a demonstrable overdue op."""
-    def __init__(self, registry: WorkerRegistry, execution_id: str, *, request_cancel: Callable, signal_process: Callable = os.kill, clock: Callable = time.monotonic, shutdown_grace: float = 30, wake_grace: float = 30, sample_progress: Callable | None = None):
+    def __init__(self, registry: WorkerRegistry, execution_id: str, *, request_cancel: Callable, signal_process: Callable = _signal_worker, clock: Callable = time.monotonic, shutdown_grace: float = 30, wake_grace: float = 30, sample_progress: Callable | None = None):
         self.registry, self.execution_id = registry, execution_id
         self.request_cancel, self.signal_process, self.clock = request_cancel, signal_process, clock
         self.shutdown_grace, self.wake_grace = shutdown_grace, wake_grace
@@ -662,10 +651,19 @@ class WorkerWatchdog:
                 verified = self.registry.observe(self.execution_id, now=now)
                 if verified.get("process_state") != "alive":
                     return verified["state"]
-                self.signal_process(verified["pid"], signal.SIGTERM if stage == "terminate" else signal.SIGKILL)
+                number = signal.SIGTERM if stage == "terminate" else getattr(signal, "SIGKILL", 9)
+                if self.signal_process is _signal_worker:
+                    identity = ProcessIdentity(**verified["identity"])
+                    if not _complete_identity(identity) or identity.pid != verified["pid"]:
+                        return "unknown"
+                    self.signal_process(identity.pid, number, expected_created=identity.created,
+                                        expected_executable=identity.executable)
+                else:
+                    # Keep the existing two-argument injection contract.
+                    self.signal_process(verified["pid"], number)
                 publish_json(receipt, {"execution_id": self.execution_id, "at": utc_now(), "monotonic": self.clock(), "signal": stage})
             elif dispatched.get("execution_id") != self.execution_id:
                 return "unknown"
             return stage
-        except (RegistryError, OSError, TypeError, ValueError):
+        except (RegistryError, OSError, TypeError, ValueError, KeyError):
             return "unknown"

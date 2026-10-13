@@ -136,11 +136,15 @@ async def _read_conversation(page: object, spec: PageProviderSpec, *, _deadline=
             else:
                 response_scope.latest_user = item
             if role == "assistant" and spec.response_content_selectors:
-                text = await _response_content_text(item, spec.response_content_selectors, _deadline=_deadline)
+                text = await _response_content_text(item, spec.response_content_selectors,
+                    decoration_selectors=spec.response_content_decoration_selectors,
+                    _deadline=_deadline)
+            elif role == "user":
+                text = await _read_user_message_text(item, spec, _deadline=_deadline)
             else:
                 text = await _await_call(item.inner_text, _deadline=_deadline)
                 text = await _without_rendered_answer_labels(item, text,
-                    spec.rendered_user_label_selectors if role == "user" else spec.rendered_answer_label_selectors, _deadline=_deadline)
+                    spec.rendered_answer_label_selectors, _deadline=_deadline)
             latest_text[role] = text
             digests.append(_text_sha256(text))
             identifier, ambiguous = await _message_id(item, spec, _deadline=_deadline)
@@ -165,6 +169,53 @@ async def _read_conversation(page: object, spec: PageProviderSpec, *, _deadline=
 async def _conversation_history(page: object, spec: PageProviderSpec, *, _deadline=None) -> dict[str, object]:
     """Expose only content digests and identities for durable checkpoints."""
     return (await _read_conversation(page, spec, _deadline=_deadline)).history
+
+
+async def _read_user_message_text(item: object, spec: PageProviderSpec, *, _deadline=None) -> str:
+    if spec.platform == "gemini":
+        evaluate = getattr(item, "evaluate", None)
+        if callable(evaluate):
+            # Gemini's user-query includes a truncated accessibility preview
+            # and controls. Its full prompt is rendered as one paragraph per
+            # original line; wrapper innerText adds paragraph spacing instead.
+            prompt = await _await_call(evaluate, r"""node => {
+                const bodies = node.querySelectorAll('.query-text');
+                if (bodies.length !== 1) return null;
+                const lines = bodies[0].querySelectorAll(':scope > p.query-text-line');
+                if (!lines.length) return null;
+                return Array.from(lines, line => {
+                    // A sole BR is the provider's empty-line placeholder;
+                    // BRs inside actual text still preserve their line breaks.
+                    const children = Array.from(line.childNodes).filter(child =>
+                        child.nodeType !== Node.COMMENT_NODE &&
+                        !(child.nodeType === Node.TEXT_NODE && !child.textContent.trim()));
+                    if (children.length === 1 && children[0].nodeName === 'BR') return '';
+                    return line.innerText;
+                }).join('\n');
+            }""", _deadline=_deadline)
+            if isinstance(prompt, str):
+                return prompt
+    if spec.platform == "copilot":
+        evaluate = getattr(item, "evaluate", None)
+        if callable(evaluate):
+            # Copilot preserves literal newlines and also inserts BR elements.
+            # Read literal characters only from this known plain-text root;
+            # rich/hidden descendants continue through the rendered reader.
+            literal = await _await_call(evaluate, r"""node => {
+                if (!node.matches('[data-testid="chatOutput"]') ||
+                    !Array.from(node.childNodes).every(child => child.nodeType === Node.TEXT_NODE ||
+                        (child.nodeType === Node.ELEMENT_NODE && child.tagName === 'BR' &&
+                            child.previousSibling?.textContent.endsWith('\n') &&
+                            child.nextSibling?.textContent.startsWith('\n')))) return null;
+                return node.textContent;
+            }""", _deadline=_deadline)
+            if isinstance(literal, str):
+                return literal.strip()
+    text = await _await_call(item.inner_text, _deadline=_deadline)
+    text = await _without_rendered_answer_labels(
+        item, text, spec.rendered_user_label_selectors, _deadline=_deadline,
+    )
+    return text.strip() if spec.platform == "copilot" else text
 
 
 def _remove_leading_dom_label(text: str, label_text: str) -> str:
@@ -326,7 +377,11 @@ async def _visible_access_block_marker(
         return "authentication_required"
     if await visible_items(page, spec.cookie_notice_selectors, _deadline=_deadline):
         return "cookie_notice"
-    if await visible_items(page, spec.other_blocker_selectors, _deadline=_deadline):
+    for blocker in await visible_items(page, spec.other_blocker_selectors, _deadline=_deadline):
+        if spec.platform == "copilot":
+            from .copilot_access import tooltip_only_dialog
+            if await tooltip_only_dialog(blocker, deadline=_deadline):
+                continue
         return "unknown_dialog"
     if spec.platform == "copilot" and spec.other_blocker_selectors:
         from .copilot_access import obstructed_composer
@@ -440,7 +495,8 @@ async def current_turn_notices(
     node. Keep this owner separate from the response used for answer capture;
     neither previous-turn notices nor quoted notices inside messages qualify.
     """
-    if not spec.current_turn_owner_selector or not expected_prompt:
+    owner_selector = spec.current_turn_notice_owner_selector or spec.current_turn_owner_selector
+    if not owner_selector or not expected_prompt:
         return ()
     latest = _scope.latest_user if _scope is not None else None
     if latest is None:
@@ -455,10 +511,7 @@ async def current_turn_notices(
             _scope.latest_user = latest
     if latest is None or not await _await_call(latest.is_visible, _deadline=_deadline):
         return ()
-    text = await _await_call(latest.inner_text, _deadline=_deadline)
-    text = await _without_rendered_answer_labels(
-        latest, text, spec.rendered_user_label_selectors, _deadline=_deadline,
-    )
+    text = await _read_user_message_text(latest, spec, _deadline=_deadline)
     if text != expected_prompt:
         return ()
     locate = getattr(latest, "locator", None)
@@ -476,7 +529,7 @@ async def current_turn_notices(
             }
             return -1;
         }""",
-        spec.current_turn_owner_selector,
+        owner_selector,
         _deadline=_deadline,
     )
     if type(index) is not int or index < 0:
@@ -487,7 +540,7 @@ async def current_turn_notices(
     )
     values = []
     for notice in await _visible_items_from_locator_owner(
-        owner, ('[role="alert"]', '[role="status"]'), _deadline=_deadline,
+        owner, spec.current_turn_notice_selectors, _deadline=_deadline,
     ):
         in_message = await _await_call(
             notice.evaluate,
@@ -599,29 +652,13 @@ async def first_visible(
     raise TimeoutError(f"no visible element matched: {', '.join(selectors)}")
 
 
-async def locator_count(
-    page: object,
-    selectors: Iterable[str],
-    *,
-    _deadline: Optional[_BrowserOperationDeadline] = None,
-) -> int:
-    """Count unique visible answer candidates from one DOM-order union."""
-
-    return (
-        await visible_answer_snapshot(
-            page,
-            selectors,
-            _deadline=_deadline,
-        )
-    ).count
-
-
 async def visible_answer_snapshot(
     page: object,
     selectors: Iterable[str],
     *,
     label_selectors: Iterable[str] = (),
     content_selectors: Iterable[str] = (),
+    decoration_selectors: Iterable[str] = (),
     collapse_nested: bool = False,
     turn_owner_selector: str = "",
     _scope: Optional[_ResponseScope] = None,
@@ -659,6 +696,7 @@ async def visible_answer_snapshot(
         latest_text = await _response_content_text(
             latest_item,
             content_values,
+            decoration_selectors=decoration_selectors,
             _deadline=_deadline,
         )
     else:
@@ -682,13 +720,15 @@ async def _response_content_text(
     response: object,
     selectors: tuple[str, ...],
     *,
+    decoration_selectors: Iterable[str] = (),
     _deadline: Optional[_BrowserOperationDeadline] = None,
 ) -> str:
     """Read one structurally unambiguous website-owned content root.
 
     Nested selector aliases are one root; disjoint roots cannot safely be
     combined or reduced to a partial answer. Content inside the chosen root is
-    returned unchanged, including any model-authored label-like text.
+    returned unchanged, including any model-authored label-like text. A known
+    website decoration is removed only when it owns the first rendered text.
     """
 
     nested_locator = getattr(response, "locator", None)
@@ -743,16 +783,45 @@ async def _response_content_text(
         # A box-less outer alias can still contain a visible child and real
         # assistant text outside it. Never demote that child to a partial root.
         if selected_index not in visible_indices:
-            raise BrowserInteractionError(
-                "provider_response_content_uninspectable"
-            )
+            # Gemini can reveal a child while its full response container is
+            # still animating from zero height. This poll has no complete
+            # readable answer yet; keep waiting for the same newest wrapper.
+            return ""
     else:
         selected_index = visible_indices[0]
     selected = getattr(candidates, "nth")(selected_index)
     inner_text = getattr(selected, "inner_text", None)
     if inner_text is None:
         raise BrowserInteractionError("provider_response_content_uninspectable")
-    text = await _await_call(inner_text, _deadline=_deadline)
+    decorations = tuple(value for value in decoration_selectors if value)
+    evaluate = getattr(selected, "evaluate", None)
+    if decorations and callable(evaluate):
+        observed = await _await_call(evaluate, """(root, selectors) => {
+            const text = root.innerText;
+            const decorations = [...root.querySelectorAll(selectors.join(', '))];
+            if (!decorations.length) return {text, label: ''};
+            const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+            while (walker.nextNode()) {
+                const node = walker.currentNode;
+                if (!node.textContent.trim()) continue;
+                const parent = node.parentElement;
+                if (!parent || parent.closest('script, style')) continue;
+                const visibility = getComputedStyle(parent).visibility;
+                if (visibility === 'hidden' || visibility === 'collapse') continue;
+                const range = document.createRange();
+                range.selectNodeContents(node);
+                if (![...range.getClientRects()].some(rect => rect.width > 0 && rect.height > 0)) continue;
+                const decoration = decorations.find(element => element.contains(node));
+                return {text, label: decoration ? decoration.innerText : ''};
+            }
+            return {text, label: ''};
+        }""", list(decorations), _deadline=_deadline)
+        if (not isinstance(observed, dict) or not isinstance(observed.get("text"), str)
+                or not isinstance(observed.get("label"), str)):
+            raise BrowserInteractionError("provider_response_content_uninspectable")
+        text = _remove_leading_dom_label(observed["text"], observed["label"])
+    else:
+        text = await _await_call(inner_text, _deadline=_deadline)
     if not isinstance(text, str):
         raise BrowserInteractionError("provider_response_content_uninspectable")
     return text
@@ -764,6 +833,7 @@ async def last_visible_text(
     *,
     label_selectors: Iterable[str] = (),
     content_selectors: Iterable[str] = (),
+    decoration_selectors: Iterable[str] = (),
     collapse_nested: bool = False,
     _deadline: Optional[_BrowserOperationDeadline] = None,
 ) -> str:
@@ -773,6 +843,7 @@ async def last_visible_text(
             selectors,
             label_selectors=label_selectors,
             content_selectors=content_selectors,
+            decoration_selectors=decoration_selectors,
             collapse_nested=collapse_nested,
             _deadline=_deadline,
         )

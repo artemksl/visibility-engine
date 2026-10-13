@@ -5,11 +5,19 @@ import asyncio
 import re
 from urllib.parse import urlsplit
 
+from automation_core.browser.async_actions import AsyncActionError
+
 from ..errors import ProviderAccessBlockedError, IdentityMismatchError, HumanVerificationRequiredError
 from ..websites import chat_actions as chat
 
 
 WIDGET_ORIGINS = {"https://res.public.onecdn.static.microsoft", "https://account.microsoft.com"}
+SIGN_IN_ACTION_REASONS = frozenset({
+    "invalid_origin", "invalid_deadline", "cancelled", "deadline_exhausted", "view_closed",
+    "ownership_lost", "target_not_unique", "target_unavailable", "invalid_target",
+    "binding_changed", "input_busy", "verification_required", "verification_failed",
+    "browser_call_failed",
+})
 
 
 def origin(url):
@@ -62,8 +70,14 @@ class CopilotBlockerService:
             lock.release()
             waited = True
         if self.holds is not None and id(submission) not in self.holds.live:
-            if any(row['profile_id'] == submission.profile_id for row in self.holds.store.rows()):
-                raise ProviderAccessBlockedError("copilot_profile_blocker_retained")
+            retained = next((row for row in self.holds.store.rows()
+                if row['profile_id'] == submission.profile_id), None)
+            if retained is not None:
+                error_type = (HumanVerificationRequiredError
+                    if retained.get('blocker_kind', 'verification') == 'verification'
+                    else ProviderAccessBlockedError)
+                raise error_type("copilot_profile_blocker_retained",
+                    reason=retained.get('reason') or 'copilot_profile_blocker_retained')
         return waited
 
     async def __call__(self, submission, deadline):
@@ -103,6 +117,7 @@ class CopilotBlockerService:
         page._visibility_runner_dialog_watch = True
 
     def _update(self, submission, marker, *, reason=None, deadline):
+        submission._last_access_block_marker = marker
         if self.holds is not None:
             self.holds.update(submission, blocker_kind=kind_for(marker),
                 status="manual_required", reason=reason or marker,
@@ -124,8 +139,15 @@ class CopilotBlockerService:
             raise ProviderAccessBlockedError("copilot_sign_in_control_disabled")
         if origin(submission.page.url) != expected_origin:
             raise IdentityMismatchError("copilot_blocker_action_origin_changed")
-        await chat._await_call(control.click, timeout=min(2000, max(1, deadline.remaining()*1000)),
-            _deadline=deadline)
+        target = await submission._actions.retain(control, deadline.expires_at)
+
+        async def verify(until):
+            await self._same_tab(submission, deadline)
+            if origin(submission.page.url) != expected_origin:
+                raise IdentityMismatchError("copilot_blocker_action_origin_changed")
+            return True
+
+        await submission._actions.click(target, deadline.expires_at, verify)
         await self._same_tab(submission, deadline)
 
     async def _visible(self, locator, deadline):
@@ -263,13 +285,20 @@ class CopilotBlockerService:
         signed_in = kind_for(marker) == "sign_in" and bool(email)
         restored_conversation = False
         try:
+            if not lock.locked():
+                # A free asyncio lock is acquired without suspending. Publish
+                # activity before begin can expose a hold to queued work.
+                await lock.acquire()
+                acquired = True
+                self.active_profiles[submission.profile_id] = id(submission)
             # Publish retention before waiting for the peer's authentication.
             if self.holds is not None:
                 await self.holds.begin(submission, deadline, blocker_kind=kind_for(marker))
                 deadline = self.holds.operation_deadline(submission, deadline)
-            await chat._await_call(lock.acquire, _deadline=deadline)
-            acquired = True
-            self.active_profiles[submission.profile_id] = id(submission)
+            if not acquired:
+                await chat._await_call(lock.acquire, _deadline=deadline)
+                acquired = True
+                self.active_profiles[submission.profile_id] = id(submission)
             while not deadline.expired():
                 await self._same_tab(submission, deadline)
                 await self.poll_commands(submission, deadline)
@@ -366,7 +395,27 @@ class CopilotBlockerService:
                         raise ProviderAccessBlockedError("copilot_blocker_action_loop_refused")
                     if signature not in seen:
                         seen.add(signature)
-                        await self._click(submission, control, deadline, expected_origin=host)
+                        try:
+                            await self._click(submission, control, deadline, expected_origin=host)
+                        except AsyncActionError as error:
+                            if kind_for(marker) != "sign_in":
+                                raise
+                            receipt = error.receipt
+                            reason = error.reason if error.reason in SIGN_IN_ACTION_REASONS else "action_failed"
+                            phase = receipt.phase if receipt.phase in {"preparation", "dispatch"} else "unknown"
+                            self._update(submission, marker,
+                                reason="copilot_sign_in_action_" + reason + "_" + phase, deadline=deadline)
+                            if (receipt.status != "not_attempted" or receipt.phase != "preparation"
+                                    or receipt.possibly_dispatched):
+                                raise
+                            # A saved session can navigate during preparation.
+                            # Keep the original episode budget and seen latch.
+                            await self._same_tab(submission, deadline)
+                            observed_marker = await chat._visible_access_block_marker(
+                                page, submission.spec, _deadline=deadline)
+                            if observed_marker is not None and kind_for(observed_marker) != "sign_in":
+                                raise
+                            continue  # Existing account/history restoration must still validate.
                         signed_in = signed_in or kind_for(marker) == "sign_in"
                 elif kind_for(marker) == "sign_in":
                     if not email:

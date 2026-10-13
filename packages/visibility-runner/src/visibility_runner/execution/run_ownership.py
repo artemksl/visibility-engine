@@ -6,13 +6,11 @@ through caller cleanup. A stale heartbeat is not a liveness decision.
 from __future__ import annotations
 
 import base64
-import fcntl
+from platform_runtime import file_locks as fcntl
 import hashlib
 import json
 import math
 import os
-import subprocess
-import sys
 import threading
 import time
 import uuid
@@ -20,6 +18,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
+
+from platform_runtime.processes import boot_identity
 
 from ..recovery.contracts import RecoveryBlocked, RecoveryIntegrityError
 from ..recovery.durable import publish_json
@@ -57,17 +57,7 @@ class ProcessObservation:
 
 
 def _boot_identity() -> str | None:
-    try:
-        if sys.platform.startswith("linux"):
-            return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-        if sys.platform == "darwin":
-            result = subprocess.run(["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"], capture_output=True, text=True, timeout=2)
-            value = result.stdout.strip()
-            if result.returncode == 0 and value:
-                return "boot-session:" + value
-        return None
-    except (OSError, RuntimeError, ImportError, subprocess.SubprocessError):
-        return None
+    return boot_identity()
 
 
 def process_identity(pid: int | None = None, *, execution_id: str | None = None) -> ProcessIdentity:
@@ -178,7 +168,7 @@ class RunOwnership:
                                "pass_id": previous_owner["pass_id"]}
                     if binding_path.exists():
                         try:
-                            if json.loads(binding_path.read_text()) != binding:
+                            if json.loads(binding_path.read_text(encoding="utf-8")) != binding:
                                 raise ValueError("pass binding changed")
                         except (OSError, ValueError, TypeError):
                             raise RecoveryIntegrityError("execution_pass_binding_invalid") from None
@@ -191,12 +181,15 @@ class RunOwnership:
             return self
         except BaseException:
             self.fd = None
-            os.close(fd)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
             raise
 
     def _read_owner(self):
         try:
-            value = json.loads(self.owner_path.read_text())
+            value = json.loads(self.owner_path.read_text(encoding="utf-8"))
             _validate_owner(value)
             return value
         except (OSError, ValueError, TypeError):
@@ -229,7 +222,7 @@ class RunOwnership:
             path = self.run_dir / "execution-heartbeat.json"
             previous = {}
             try:
-                previous = json.loads(path.read_text())
+                previous = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 pass
             now = time.monotonic()
@@ -256,7 +249,7 @@ class RunOwnership:
             self.assert_owned()
             path = self.run_dir / "execution-heartbeat.json"
             try:
-                value = json.loads(path.read_text())
+                value = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 return
             if value.get("execution_id") != self.execution_id:
@@ -288,8 +281,10 @@ class RunOwnership:
                         value.update(status="released", released_at=utc_now())
                         publish_json(self.owner_path, value)
             finally:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-                os.close(fd)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(fd)
 
     def __enter__(self):
         return self.acquire()
@@ -431,7 +426,7 @@ def inspect_run_ownership(run_dir: Path | str) -> dict[str, Any]:
     run_dir = Path(run_dir)
     path = run_dir / "execution-owner.json"
     try:
-        value = json.loads(path.read_text())
+        value = json.loads(path.read_text(encoding="utf-8"))
         _validate_owner(value)
         identity = ProcessIdentity.from_dict(value["identity"])
         observation = inspect_process(identity)

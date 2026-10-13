@@ -7,7 +7,8 @@ Different resolved state roots intentionally remain different namespaces.
 
 from contextlib import contextmanager, ExitStack
 from dataclasses import dataclass
-import fcntl
+from platform_runtime import file_locks as fcntl
+from platform_runtime.security import protect_private
 import hashlib
 import os
 from pathlib import Path
@@ -44,16 +45,20 @@ def _lock(path: Path) -> Iterator[None]:
             raise NeedsAttention("Another run is using this browser profile or account.") from None
         yield
     finally:
-        os.close(fd)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 @contextmanager
 def _resource_keys(state_root: Path, keys: tuple[str, ...]) -> Iterator[ResourceLease]:
     root = Path(state_root).resolve()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    root.chmod(0o700)
+    protect_private(root, directory=True)
     locks = root / "locks"
     locks.mkdir(exist_ok=True, mode=0o700)
+    protect_private(locks, directory=True)
     ordered = tuple(sorted(keys))
     with ExitStack() as stack:
         for key in ordered:

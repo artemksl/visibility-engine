@@ -21,6 +21,11 @@ GEMINI_SPEC = PageProviderSpec(
         "rich-textarea .ql-editor[contenteditable='true']",
         "rich-textarea [role='textbox']",
     ),
+    composer_obstruction_close_selectors=(
+        'map-local-immersive-panel .maps-container[aria-hidden="false"] '
+        '.action-bar gem-icon-button.close-button button[aria-label="Close"]',
+    ),
+    composer_obstruction_view_query_parameters=("canvas-id",),
     send_selectors=(
         "gem-icon-button.send-button button",
         "gem-icon-button.submit button",
@@ -48,6 +53,11 @@ GEMINI_SPEC = PageProviderSpec(
         "message-content",
         "structured-content-container.model-response-text",
     ),
+    # A rendered fenced block starts with the website's language/copy toolbar.
+    # Its label is UI text; an identical word in model prose is still content.
+    response_content_decoration_selectors=(
+        "code-block .code-block-decoration",
+    ),
     user_message_selectors=(
         "user-query",
         "[data-test-id='user-query']",
@@ -56,7 +66,7 @@ GEMINI_SPEC = PageProviderSpec(
     # Remove only that website-owned descendant so exact prompt comparison
     # remains byte-preserving even when the prompt itself starts "You said".
     rendered_user_label_selectors=(
-        "span.screen-reader-user-query-label",
+        ".screen-reader-user-query-label",
     ),
     stop_selectors=(
         'button[aria-label="Stop response"]',
@@ -82,20 +92,28 @@ GEMINI_SPEC = PageProviderSpec(
     authentication_url_prefixes=(
         "https://accounts.google.com/",
     ),
+    cookie_notice_selectors=(
+        '[role="dialog"]:has(cookie-banner)' + _OUTSIDE_CONVERSATION,
+    ),
+    cookie_reject_selectors=(
+        'cookie-banner button[data-test-id="reject-button"]:text-is("Reject all")' + _OUTSIDE_CONVERSATION,
+    ),
+    optional_notice_dismiss_selectors=(
+        '[role="dialog"]:has(button:is(:text-is("Use precise location"), '
+        ':has(:text-is("Use precise location")))) '
+        'button:is(:text-is("Dismiss"), :has(:text-is("Dismiss")))'
+        + _OUTSIDE_CONVERSATION,
+    ),
     # Account-management links are not sign-in proof. Limit these selectors to
     # the website banner's login routes, excluding all conversation content.
     unauthenticated_control_selectors=tuple(selector + _OUTSIDE_CONVERSATION for selector in (
+        'top-bar-actions .signed-out-buttons button:text-is("Sign in")',
+        'a[aria-label="Sign in"][href^="https://accounts.google.com/ServiceLogin"]',
         'header a[href^="https://accounts.google.com/ServiceLogin"]',
         '[role="banner"] a[href^="https://accounts.google.com/ServiceLogin"]',
         'header a[href^="https://accounts.google.com/v3/signin/"]',
         '[role="banner"] a[href^="https://accounts.google.com/v3/signin/"]',
     )),
-    terminal_error_selectors=(
-        "model-response [role='alert']",
-        "model-response .error-container",
-        "model-response [data-test-id*='error']",
-        "[data-test-id='model-response'] [role='alert']",
-    ),
     terminal_error_within_response_selectors=(
         "[role='alert']",
         ".error-container",
@@ -107,12 +125,6 @@ GEMINI_SPEC = PageProviderSpec(
         "couldn't generate a response",
         "could not generate a response",
         "try again",
-    ),
-    native_retry_selectors=(
-        "model-response [role='alert'] button:has-text('Retry')",
-        "model-response .error-container button:has-text('Try again')",
-        "model-response [data-test-id*='error'] button:has-text('Retry')",
-        "[data-test-id='model-response'] [role='alert'] button:has-text('Try again')",
     ),
     native_retry_within_response_selectors=(
         "[role='alert'] button:has-text('Retry')",

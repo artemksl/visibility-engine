@@ -88,6 +88,11 @@ COPILOT_SPEC = PageProviderSpec(
         '[data-content="user-message"]',
         '[data-testid="user-message"]:not([data-content="user-message"], [data-content="user-message"] *)',
     ),
+    current_turn_notice_owner_selector="main",
+    current_turn_notice_selectors=tuple(selector + _OUTSIDE_CONVERSATION
+        + ':not([data-testid="copilot-message-div"], [data-testid="copilot-message-div"] *)'
+        for selector in ('[role="alert"]', '[role="status"]',
+            '[role="region"]:has([role="heading"]:text-matches("daily limit", "i"))')),
     stop_selectors=(
         'button[data-testid="stop-button"]',
         'button[aria-label="Stop response"]',
@@ -134,9 +139,6 @@ COPILOT_SPEC = PageProviderSpec(
         + ':not(:has([data-testid="markdown-reply"], [data-testid="chatOutput"], '
         '[data-content="ai-message"], [data-content="user-message"], [data-testid="user-message"]))'
         for selector in ('dialog[open]', '[role="dialog"][aria-modal="true"]', '[role="alertdialog"]', '[aria-modal="true"]')),
-    terminal_error_selectors=tuple(
-        root + ' [role="alert"]' for root in _ASSISTANT.split(', ')
-    ),
     terminal_error_within_response_selectors=('[role="alert"]',),
     terminal_error_markers=("something went wrong", "please try again", "unable to respond"),
     conversation_url_prefixes=(
@@ -147,8 +149,10 @@ COPILOT_SPEC = PageProviderSpec(
     response_timeout_seconds=COPILOT_BROWSER_TURN_TIMEOUT_SECONDS,
     type_composer_input=True,
     copilot_lexical_readback=True,
-    composer_typing_min_delay_ms=5.0,
-    composer_typing_max_delay_ms=15.0,
+    # Native typing keeps Lexical events; zero pacing selects the shared
+    # executor's bounded chunks instead of a full DOM guard for every letter.
+    composer_typing_min_delay_ms=0.0,
+    composer_typing_max_delay_ms=0.0,
 )
 
 

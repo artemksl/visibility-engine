@@ -27,7 +27,7 @@ VISIBILITY_TEST_PLATFORMS = {
     "copilot-gemini": "github_copilot",
 }
 _REQUEST_ID = re.compile(r"[A-Za-z0-9_-]{8,128}", re.ASCII)
-_PAYLOAD_FIELDS = frozenset({"request_id", "prompt_count", "prompt", "prompts"})
+_PAYLOAD_FIELDS = frozenset({"request_id", "prompt_count", "prompt", "prompts", "selected_profile_ids"})
 
 
 def _diagnostic_prompts(payload: Mapping) -> list[str]:
@@ -71,6 +71,12 @@ def build_visibility_test_config(
     if not isinstance(request_id, str) or _REQUEST_ID.fullmatch(request_id) is None:
         raise ValueError("request_id must contain 8–128 letters, numbers, underscores, or hyphens")
     prompts = _diagnostic_prompts(payload)
+    permitted = selected_profile_ids(root)
+    selected = payload.get("selected_profile_ids", permitted)
+    if (not isinstance(selected, list) or not selected
+        or any(not isinstance(value, str) or value not in permitted for value in selected)
+        or len(set(selected)) != len(selected)):
+        raise ValueError("Select at least one configured profile, without duplicate or unknown IDs")
     platform = VISIBILITY_TEST_PLATFORMS[platform_slug]
     measurement = {
         "scope_kind": "diagnostic",
@@ -81,7 +87,7 @@ def build_visibility_test_config(
     result = {
         "request_id": request_id,
         "runs": "single",
-        "selected_profile_ids": selected_profile_ids(root),
+        "selected_profile_ids": list(selected),
         "use_all_configured_profiles": False,
         "audit_platforms": [platform],
         "visibility_test": measurement,
@@ -131,6 +137,7 @@ def preview_visibility_test(
 def visibility_test_options(root=None) -> dict:
     """Describe the diagnostic API and explicit local profile selection without provider calls."""
     base = "/api/testing/visibility"
+    permitted = selected_profile_ids(root)
     return {
         "schema_version": "visibility_testing.v1",
         "endpoints": {
@@ -154,6 +161,11 @@ def visibility_test_options(root=None) -> dict:
                     "type": "array", "minItems": 1,
                     "items": {"type": "string", "minLength": 1},
                 },
+                "selected_profile_ids": {
+                    "type": "array", "minItems": 1, "uniqueItems": True,
+                    "items": {"type": "string", "enum": permitted},
+                    "default": permitted,
+                },
             },
             "not": {"required": ["prompt", "prompts"]},
         },
@@ -164,7 +176,7 @@ def visibility_test_options(root=None) -> dict:
             "and prompt_count uses the default prompt once. There is no configured count ceiling. "
             "The count is total across profiles, not multiplied by profile count; retries may add requests."
         ),
-        "profile_ids": selected_profile_ids(root),
+        "profile_ids": permitted,
         "start_behavior": (
             "POST to a start endpoint creates a live diagnostic job using the visibility runner. "
             "The job sends browser or Copilot requests and may consume provider credits. "

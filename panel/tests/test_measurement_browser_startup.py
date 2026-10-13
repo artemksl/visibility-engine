@@ -3,6 +3,7 @@
 import io
 import json
 import copy
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,7 +40,10 @@ def test_start_and_refetch_restart_frozen_profiles_before_measurement_and_hold_l
 
     def launch(command, **kwargs):
         events.append("restart")
-        assert command[:2] == ["/bin/bash", str(tmp_path / "config/launch_logged_in.sh")]
+        expected_launcher = ([sys.executable, str(tmp_path / "config/launch_logged_in.py")]
+                             if sys.platform == "win32" else
+                             ["/bin/bash", str(tmp_path / "config/launch_logged_in.sh")])
+        assert command[:2] == expected_launcher
         private_manifest = Path(command[command.index("--profiles-path") + 1])
         assert private_manifest != Path(runtime["profiles"]["manifest_path"])
         assert json.loads(private_manifest.read_text()) == json.loads(Path(runtime["profiles"]["manifest_path"]).read_text())

@@ -100,6 +100,15 @@ def test_original_generic_limit_rejection_blocks_without_inventing_scope():
     assert result["reset_clock"] is None
 
 
+@pytest.mark.parametrize('clock, expected', [('1:00 AM', '01:00'), ('1:00am', '01:00'), ('25:78am', None)])
+def test_copilot_daily_limit_check_back_preserves_only_a_valid_display_clock(clock, expected):
+    result = parse_chatgpt_usage_limit_notice(
+        f"You've reached your daily limit. Get more usage now or check back at {clock}.")
+    assert result['blocking'] is True and result['scope'] == 'unknown'
+    assert result['reset_clock'] == expected
+    assert result['reset_timezone'] is None and result['reset_day'] is None
+
+
 def test_generic_limit_without_try_again_does_not_prove_blocking():
     result = parse_chatgpt_usage_limit_notice("You've exceeded your usage limit.")
     assert result["scope"] == "unknown"

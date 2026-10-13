@@ -9,7 +9,7 @@ import dataclasses
 from datetime import datetime, timezone
 from pathlib import Path
 import re
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Mapping
 from urllib.parse import quote
 
@@ -24,7 +24,7 @@ from ..recovery.api import (
 )
 from ..storage.send_attempts import SendAttemptState
 from ..recovery.service import active_items
-from ..websites.chat_actions import PROVIDER_PREPARATION_TIMEOUT_SECONDS
+from ..websites.chat_actions import PROVIDER_PREPARATION_TIMEOUT_SECONDS, RECOVERY_INSPECTION_TIMEOUT_SECONDS
 
 ADAPTER_VERSION = "1"
 WORKFLOW_VERSION = "visibility-two-turn-1"
@@ -234,7 +234,13 @@ def snapshot_for(repository, run_id, *, worker_observation=None, verified=None, 
         for issue in verified.group_progress[packet["packet_id"]].get("issues", ()):
             for item_id in packet["observation_ids"]:
                 if issue.get("observation_id") in {None, item_id}:
-                    packet_failures[item_id] = str(issue.get("code") or "measurement_incomplete")
+                    detail = issue.get("detail")
+                    access = detail.get("access_block") if isinstance(detail, Mapping) else None
+                    access_reason = access.get("reason") if isinstance(access, Mapping) else None
+                    packet_failures[item_id] = (access_reason if access_reason in {
+                        "authentication_required", "human_verification_required",
+                        "unusual_activity", "usage_limit", "provider_access_blocked",
+                    } else str(issue.get("code") or "measurement_incomplete"))
     failures.update(packet_failures)
     # The effect ledger is authoritative even if a crash occurred between
     # submission admission and the legacy send-fence transition.
@@ -292,7 +298,7 @@ def snapshot_for(repository, run_id, *, worker_observation=None, verified=None, 
                 links.append("conversations/"+canonical_sha256({"attempt":_payload(event)["source_attempt_id"]}))
         states.append(ItemState(
             item.item_id,
-            status="succeeded" if succeeded else ("cancelled" if failures.get(item.item_id)=="verification_observation_cancelled" else "failed" if result is not None or records else "cancelled" if verified.runner_state.get("cancel_requested") else "never_started"),
+            status="succeeded" if succeeded else ("cancelled" if failures.get(item.item_id)=="verification_observation_cancelled" else "failed" if result is not None or records or item.item_id in packet_failures else "cancelled" if verified.runner_state.get("cancel_requested") else "never_started"),
             reason_code="" if succeeded else failures.get(item.item_id,"unresolved_send" if unresolved else "cancelled" if verified.runner_state.get("cancel_requested") else "measurement_incomplete"),
             unresolved_attempt_ids=unresolved,
             historical_unresolved_attempt_ids=historical_unresolved,
@@ -700,6 +706,14 @@ class VisibilityExecution:
         self.failed.add(item_id)
         self.progress(item_id,complete=True)
 
+    def item_failure_reason(self, item_id):
+        """Read this pass's recorded item refusal without duplicating state."""
+        for event in reversed(self.coordinator.ledger.select("failure", item_id=item_id)):
+            payload = event["payload"]
+            if payload.get("pass_id") == self.pass_id and payload.get("attempt_id") is None:
+                return payload.get("reason_code") or None
+        return None
+
     def item_refusal(self, item_id, error):
         """Record a coordinator refusal that concerns this item only.
 
@@ -734,13 +748,45 @@ class VisibilityExecution:
         self.progress()
         self.coordinator.complete_pass(self.pass_id, self.owner)
 
+    async def wait_for_active_blocker(self, worker, profile_id, item_id):
+        holds = self.verification_holds
+        if holds is None:
+            return None
+        handler = getattr(worker.providers.drivers.get('copilot'), 'human_verification_handler', None)
+        active = getattr(handler, 'active_profiles', {}).get(profile_id)
+        entry = holds.live.get(active)
+        if entry is None:
+            return None
+        row = holds.store.episode(entry['episode_id'])
+        if (not row['retained'] or row.get('blocker_kind') not in {'sign_in', 'verification'}
+                or row['profile_id'] != profile_id
+                or row['execution_id'] != self.owner.execution_id
+                or row['status'] in {'unsupported_held', 'expired_held'}):
+            return None
+        from ..errors import ProviderAccessBlockedError
+        from ..websites.chat_actions import _BrowserOperationDeadline
+        deadline = _BrowserOperationDeadline(row['deadline_monotonic'], 'copilot blocker peer wait expired')
+        self.progress(item_id, deadline=deadline.expires_at)
+        try:
+            await worker._await_with_cancellation(self.snapshot.manifest.run_id,
+                handler.gate(SimpleNamespace(profile_id=profile_id), deadline),
+                detail='cancellation interrupted Copilot blocker peer wait')
+        except ProviderAccessBlockedError as error:
+            return error.reason
+        except TimeoutError:
+            return 'copilot_blocker_deadline_expired'
+        return None
+
     async def prepare_item(self, worker, item_id, observation, packet):
         scopes={scope for operation in self.snapshot.manifest.operations if operation.item_id==item_id for scope in operation.resource_scopes}
-        if self.verification_holds is not None and any(
-                scope.endswith(':copilot') and self.verification_holds.store.scope_held(
-                    scope.partition(':')[0], item_id=item_id) for scope in scopes):
-            self.failure(item_id, 'copilot_verification_required')
-            return False
+        if self.verification_holds is not None:
+            for scope in scopes:
+                profile_id, _, platform = scope.partition(':')
+                if platform == 'copilot' and self.verification_holds.store.scope_held(profile_id, item_id=item_id):
+                    reason = await self.wait_for_active_blocker(worker, profile_id, item_id)
+                    if self.verification_holds.store.scope_held(profile_id, item_id=item_id):
+                        self.failure(item_id, reason or 'copilot_verification_required')
+                        return False
         if scopes.intersection(self.blocked_scopes):
             self.failure(item_id,"owned_resource_cleanup_blocked")
             return False
@@ -794,6 +840,8 @@ class VisibilityExecution:
                 and original.fence_id in prior_checked
                 and original.fence_id not in uncertain_ids)
             response_check_seconds=0 if original.fence_id in selection.replacement_attempt_ids or known_previously_checked else self.operations[op_id].deadline_seconds
+            inspection_seconds = (min(RECOVERY_INSPECTION_TIMEOUT_SECONDS, self.operations[op_id].deadline_seconds)
+                                  if response_check_seconds == 0 else response_check_seconds)
             binding = self.correlation(original.fence_id)
             recovered = None
             submission = None
@@ -830,7 +878,7 @@ class VisibilityExecution:
                             effect = self.coordinator.admit_effect(self.pass_id,op_id,"retrieve_existing",
                                 self.operations[op_id].input_digest,self.owner,attempt_id=attempt.attempt_id)
                             self.coordinator.mark_dispatched(effect.effect_id,self.owner)
-                            self.progress(item_id,deadline=__import__('time').monotonic()+response_check_seconds+PROVIDER_PREPARATION_TIMEOUT_SECONDS)
+                            self.progress(item_id,deadline=__import__('time').monotonic()+inspection_seconds+PROVIDER_PREPARATION_TIMEOUT_SECONDS)
                         except BaseException:
                             slot.release()
                             raise
@@ -1069,7 +1117,7 @@ class VisibilityExecution:
                     "original_attempt_id":original.fence_id,
                 },self.owner)
                 atomic_write_json(path,record.to_mapping(),exclusive=True)
-            elif __import__('json').loads(path.read_text()) != record.to_mapping():
+            elif __import__('json').loads(path.read_text(encoding="utf-8")) != record.to_mapping():
                 raise IntegrityError('recovered_attempt_revision_conflict')
 
 

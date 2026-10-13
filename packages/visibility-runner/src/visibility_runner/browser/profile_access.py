@@ -29,11 +29,9 @@ from ..errors import (
 from .profile_matching import BrowserProfile
 from ..recovery.contracts import safe_id
 from ..recovery.durable import publish_json, publish_bytes, sync_directory
+from platform_runtime.storage import remove_complete
 
-try:  # Unix/macOS production path.
-    import fcntl
-except ImportError:  # pragma: no cover - process-local access checks remain available.
-    fcntl = None
+from platform_runtime import file_locks as fcntl
 
 
 DEFAULT_PROFILE_LEASE_ROOT = (
@@ -84,7 +82,7 @@ def read_verification_marker(path):
     try:
         if path.stat().st_size > 2_000_000:
             raise ValueError()
-        value = json.loads(path.read_text())
+        value = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
     except (OSError, ValueError, TypeError):
@@ -147,15 +145,14 @@ def verification_marker_transaction(path, *, profile, namespace, provider, timeo
         raise ProfileVerificationHeld("verification_hold_lock_timeout")
     try:
         with path.with_suffix(".lock").open("a+") as handle:
-            if fcntl is not None:
-                while True:
-                    try:
-                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        break
-                    except BlockingIOError:
-                        if time.monotonic() >= deadline:
-                            raise ProfileVerificationHeld("verification_hold_lock_timeout") from None
-                        time.sleep(min(.02, max(0, deadline - time.monotonic())))
+            while True:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise ProfileVerificationHeld("verification_hold_lock_timeout") from None
+                    time.sleep(min(.02, max(0, deadline - time.monotonic())))
             try:
                 body = read_verification_marker(path) or {
                     "schema_version": 1, "namespace": str(namespace),
@@ -171,8 +168,7 @@ def verification_marker_transaction(path, *, profile, namespace, provider, timeo
                 body["state_sha256"] = _verification_digest(body)
                 publish_json(path, body)
             finally:
-                if fcntl is not None:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     finally:
         lock.release()
 
@@ -622,8 +618,7 @@ class ProfileReservations:
             try:
                 if item.website_lock_file is not None:
                     try:
-                        if fcntl is not None:
-                            fcntl.flock(item.website_lock_file.fileno(), fcntl.LOCK_UN)
+                        fcntl.flock(item.website_lock_file.fileno(), fcntl.LOCK_UN)
                     finally:
                         item.website_lock_file.close()
                 if item.website_thread_lock is not None:
@@ -632,11 +627,10 @@ class ProfileReservations:
                 errors.append(exc)
             try:
                 try:
-                    if fcntl is not None:
-                        fcntl.flock(
-                            item.physical_handle.fileno(),
-                            fcntl.LOCK_UN,
-                        )
+                    fcntl.flock(
+                        item.physical_handle.fileno(),
+                        fcntl.LOCK_UN,
+                    )
                 finally:
                     item.physical_handle.close()
             except BaseException as exc:
@@ -667,8 +661,6 @@ def _acquire_flock(
     cancelled: Callable[[], bool],
     profile: BrowserProfile,
 ) -> None:
-    if fcntl is None:
-        return
     while True:
         if cancelled():
             raise ProfileLeaseCancelled(
@@ -754,8 +746,8 @@ def reserve_profiles(
                 ).open("a+", encoding="utf-8")
                 operation = (
                     fcntl.LOCK_SH
-                    if shared_physical and fcntl is not None
-                    else fcntl.LOCK_EX if fcntl is not None else 0
+                    if shared_physical
+                    else fcntl.LOCK_EX
                 )
                 _acquire_flock(
                     physical_handle,
@@ -801,7 +793,7 @@ def reserve_profiles(
                     ).open("a+", encoding="utf-8")
                     _acquire_flock(
                         website_lock_file,
-                        fcntl.LOCK_EX if fcntl is not None else 0,
+                        fcntl.LOCK_EX,
                         deadline=deadline,
                         cancelled=is_cancelled,
                         profile=profile,
@@ -851,16 +843,14 @@ def reserve_profiles(
             except BaseException:
                 if website_lock_file is not None:
                     try:
-                        if fcntl is not None:
-                            fcntl.flock(website_lock_file.fileno(), fcntl.LOCK_UN)
+                        fcntl.flock(website_lock_file.fileno(), fcntl.LOCK_UN)
                     finally:
                         website_lock_file.close()
                 if thread_lock is not None and thread_lock_acquired:
                     thread_lock.release()
                 if physical_handle is not None:
                     try:
-                        if fcntl is not None:
-                            fcntl.flock(physical_handle.fileno(), fcntl.LOCK_UN)
+                        fcntl.flock(physical_handle.fileno(), fcntl.LOCK_UN)
                     finally:
                         physical_handle.close()
                 profile_access_lock.release(shared=shared_physical)
@@ -977,7 +967,7 @@ class ProfileReservationManager:
     ) -> ProfileReservations:
         """Acquire the real lane locks solely for exact owned-resource cleanup."""
         selected_provider = _provider_value(provider)
-        if selected_provider is None or fcntl is None:
+        if selected_provider is None:
             raise ProfileLeaseError("containment requires an OS-locked exact provider lane")
         if isinstance(timeout_seconds, bool) or not math.isfinite(float(timeout_seconds)) or timeout_seconds < 0:
             raise ProfileLeaseError("containment timeout must be finite and nonnegative")
@@ -1037,9 +1027,8 @@ class ProfileReservationManager:
             latest = path.stat()
             if path.read_bytes() != original or (latest.st_dev, latest.st_ino) != (identity.st_dev, identity.st_ino):
                 raise ProfileLeaseQuarantined("containment marker changed during resolution")
-            path.unlink()
             try:
-                sync_directory(path.parent)
+                remove_complete(path, directory_sync=sync_directory)
             except OSError:
                 # Retain the fail-closed marker when durable removal cannot be
                 # confirmed; the caller's archived resolution remains intact.

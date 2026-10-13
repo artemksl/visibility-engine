@@ -1,4 +1,4 @@
-"""Interpret text from an already proven ChatGPT provider notice."""
+"""Interpret text from an already proven provider notice."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ _RESET_DISPLAY_PATTERN = (
 )
 _RESET_DISPLAY = re.compile(_RESET_DISPLAY_PATTERN, re.IGNORECASE)
 _RESET = re.compile(
-    r"\b(?:resets?|try\s+again)\s+(?P<display>" + _RESET_DISPLAY_PATTERN + ")",
+    r"\b(?:resets?|try\s+again|check\s+back)\s+(?P<display>" + _RESET_DISPLAY_PATTERN + ")",
     re.IGNORECASE,
 )
 _CLOCK = re.compile(r"(\d{1,2})(?::(\d{2}))?(?:\s*([ap]m))?", re.IGNORECASE)
@@ -109,7 +109,7 @@ def parse_chatgpt_usage_limit_notice(text: str) -> dict[str, object] | None:
         text_allowed is not True
         and scope == "unknown"
         and _LIMIT_REJECTION.search(matching_text) is not None
-        and re.search(r"\btry\s+again\b", matching_text, re.IGNORECASE) is not None
+        and re.search(r"\b(?:try\s+again|check\s+back)\b", matching_text, re.IGNORECASE) is not None
     )
     reset = {
         "reset_day": None,

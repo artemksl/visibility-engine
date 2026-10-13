@@ -4871,6 +4871,10 @@ body.outreach-drawer-open::after {
 .visibility-test-panel { margin-bottom: 24px; }
 .visibility-test-form { display: grid; gap: 14px; padding: 0 20px 18px; }
 .visibility-test-fields { display: grid; grid-template-columns: 1fr 1fr minmax(140px, 0.65fr); gap: 14px; }
+.visibility-test-profiles { margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.visibility-test-profiles legend { padding: 0 4px; font-size: 13px; }
+.visibility-test-profiles > div { display: flex; flex-wrap: wrap; gap: 10px 18px; margin-bottom: 8px; }
+.visibility-test-profiles label { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .visibility-test-form textarea { resize: vertical; min-height: 76px; }
 .visibility-test-form p { margin: 0; font-size: 12px; line-height: 1.5; }
 .visibility-test-summary { padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--input-bg); font-size: 13px; line-height: 1.6; }

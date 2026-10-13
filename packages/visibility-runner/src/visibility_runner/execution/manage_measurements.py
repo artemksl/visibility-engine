@@ -245,11 +245,12 @@ class Runner:
 
     def ownership(self, run_id: str):
         from .run_ownership import inspect_run_ownership
-        import fcntl, os
+        from platform_runtime import file_locks as fcntl
+        import os
         root = self._existing_run_dir(run_id)
         observed = inspect_run_ownership(root)
         try:
-            progress=json.loads((root / "execution-heartbeat.json").read_text())
+            progress=json.loads((root / "execution-heartbeat.json").read_text(encoding="utf-8"))
             if progress.get("execution_id")==observed.get("execution_id"):
                 observed["progress"]={key:value for key,value in progress.items() if key in {"execution_id","pass_id","sampled_at","monotonic","progress_monotonic","operations","boot_id"}}
         except (OSError,ValueError,TypeError):
@@ -1595,8 +1596,8 @@ class Runner:
                         page_cache[key] = page
                 return page
 
-            page_factory._restart_profiles = getattr(self, "_browser_restart_profiles", frozenset())
-            self._browser_restart_profiles = frozenset()
+            from ..browser.restart import attachment_rebind_authorizer
+            page_factory._authorize_restarted_context = attachment_rebind_authorizer(self.repository, attachment)
             registry = ProviderRegistry()
             def desktop_progress(observation_id, detail):
                 try:

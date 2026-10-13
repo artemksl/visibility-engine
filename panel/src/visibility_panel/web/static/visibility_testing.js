@@ -11,6 +11,7 @@
   let previewVersion = 0;
   let repeatCount = "1";
   let resultJob = null;
+  let profilesReady = false;
 
   function status(message, tone = "info") {
     const node = byId("visibilityTestStatus");
@@ -34,10 +35,13 @@
   function fields() {
     const platform = byId("visibilityTestPlatform").value;
     if (!Object.hasOwn(labels, platform)) throw new Error("Choose a supported platform.");
+    if (!profilesReady) throw new Error("Configured profiles are not available. Reload after checking local settings.");
+    const selected_profile_ids = [...form.querySelectorAll('input[name="visibilityTestProfile"]:checked')].map((input) => input.value);
+    if (!selected_profile_ids.length) throw new Error("Select at least one profile.");
     if (byId("visibilityTestMode").value === "list") {
       const prompts = promptLines();
       if (!prompts.length) throw new Error("Enter at least one prompt, one per line.");
-      return {platform, body: {prompts}};
+      return {platform, body: {prompts, selected_profile_ids}};
     }
     const raw = byId("visibilityTestCount").value.trim();
     const count = Number(raw);
@@ -46,7 +50,7 @@
     }
     const prompt = byId("visibilityTestPrompt").value;
     if (!prompt.trim()) throw new Error("Enter a prompt.");
-    return {platform, body: {prompt_count: count, prompt}};
+    return {platform, body: {prompt_count: count, prompt, selected_profile_ids}};
   }
 
   function readPending() {
@@ -74,9 +78,9 @@
       : "");
     notice.hidden = !notice.textContent;
     byId("visibilityTestStart").textContent = busy ? "Starting…" : pending ? "Retry same test" : "Start test";
-    byId("visibilityTestStart").disabled = busy || Boolean(storageError);
+    byId("visibilityTestStart").disabled = busy || Boolean(storageError) || (!profilesReady && !pending);
     byId("visibilityTestStart").formNoValidate = Boolean(pending);
-    byId("visibilityTestPreview").disabled = busy || previewBusy || Boolean(pending) || Boolean(storageError);
+    byId("visibilityTestPreview").disabled = busy || previewBusy || Boolean(pending) || Boolean(storageError) || !profilesReady;
     form.setAttribute("aria-busy", String(busy));
   }
 
@@ -128,7 +132,8 @@
       });
       if (version !== previewVersion) return;
       const summary = byId("visibilityTestSummary");
-      summary.textContent = `${labels[request.platform]} · ${promptDescription(request.body)} · ${result.initial_request_counts.source} answers + ${result.initial_request_counts.extraction} extractions. Distributed across ${result.selected_profile_ids.length} profiles. Retries may add requests.`;
+      const profileCount = result.selected_profile_ids.length;
+      summary.textContent = `${labels[request.platform]} · ${promptDescription(request.body)} · ${result.initial_request_counts.source} answers + ${result.initial_request_counts.extraction} extractions. Distributed across ${profileCount} ${profileCount === 1 ? "profile" : "profiles"}. Retries may add requests.`;
       summary.hidden = false;
       status("Preview ready. No prompts have been sent.");
     } catch (error) {
@@ -205,6 +210,7 @@
     byId(id).addEventListener("input", invalidatePreview);
     byId(id).addEventListener("change", invalidatePreview);
   }
+  byId("visibilityTestProfiles").addEventListener("change", invalidatePreview);
   byId("visibilityTestResult").addEventListener("click", (event) => {
     event.preventDefault();
     if (resultJob) void showResult(resultJob).catch((error) => status(error.message, "error"));
@@ -213,4 +219,32 @@
   catch (error) { storageError = error.message; }
   updateFields();
   renderPending();
+  async function loadProfiles() {
+    const choices = byId("visibilityTestProfileChoices");
+    try {
+      const options = await requestJson("/api/testing/visibility");
+      const ids = options.profile_ids;
+      if (!Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length
+        || ids.some((id) => typeof id !== "string" || !/^[a-z0-9]+(?:_[a-z0-9]+)*$/.test(id))) {
+        throw new Error("Configured profile selection is invalid.");
+      }
+      choices.replaceChildren(...ids.map((id) => {
+        const label = document.createElement("label");
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.name = "visibilityTestProfile";
+        input.value = id;
+        input.checked = true;
+        label.append(input, document.createTextNode(id));
+        return label;
+      }));
+      profilesReady = true;
+    } catch (error) {
+      choices.textContent = error.message;
+      status("Check config/settings.json and reload to select profiles.", "error");
+    } finally {
+      renderPending();
+    }
+  }
+  void loadProfiles();
 })();

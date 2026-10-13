@@ -70,7 +70,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             if path in {'/', '/visibility-testing'}:
-                self._send_text((ASSET_DIR / 'templates/visibility_testing.html').read_text(), 'text/html; charset=utf-8')
+                self._send_text((ASSET_DIR / 'templates/visibility_testing.html').read_text(encoding="utf-8"), 'text/html; charset=utf-8')
             elif path == '/health':
                 self._send_json({'ok': True})
             elif path.startswith('/static/'):

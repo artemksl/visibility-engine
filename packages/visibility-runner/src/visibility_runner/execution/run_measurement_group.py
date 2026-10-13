@@ -681,7 +681,9 @@ class MeasurementGroupWorker:
                 finally:
                     self._finish_operation_scope(run_id, packet_id, observation_id, token)
                 if not prepared:
-                    issues.append(_issue(observation_id, "original_response_unresolved", "Original response recovery did not complete", recoverable=False))
+                    reason = self.recovery.item_failure_reason(observation_id) or "original_response_unresolved"
+                    issues.append(_issue(observation_id, reason,
+                        f"Recovery did not complete: {reason}", recoverable=False))
                     continue
             unresolved_website_attempts = _unresolved_website_attempts(
                 website_send_attempts,
@@ -833,6 +835,15 @@ class MeasurementGroupWorker:
                     # This prompt measurement's own actions are no longer in flight, so
                     # an ambiguous send attempt it left behind must be reported below.
                     self._active_observations.discard(observation_id)
+                    open_failure_evidence = []
+                    failed_open = getattr(exc, "_visibility_open_submission", None)
+                    if getattr(failed_open, "observation_id", None) == observation_id:
+                        references = await self._capture_send_failure(
+                            run_id, packet_id, None, failed_open, exc,
+                            phase="provider_open", observation_id=observation_id,
+                        )
+                        if references:
+                            open_failure_evidence.append(references)
                     access_error = _provider_access_error(exc)
                     access_detail = None
                     if access_error is not None:
@@ -867,9 +878,10 @@ class MeasurementGroupWorker:
                                     "observation_execution",
                                 ),
                             ),
-                            failure_evidence=self._send_failure_evidence.get(
-                                unresolved.fence_id,
-                            ),
+                            failure_evidence=[
+                                *self._send_failure_evidence.get(unresolved.fence_id, []),
+                                *open_failure_evidence,
+                            ],
                         )
                         if access_detail is not None:
                             issue["detail"].update(access_detail)
@@ -877,6 +889,8 @@ class MeasurementGroupWorker:
                         stop_packet = True
                         break
                     if access_detail is not None:
+                        if open_failure_evidence:
+                            access_detail["failure_evidence"] = open_failure_evidence
                         issues.append(
                             _website_access_issue(
                                 observation_id,
@@ -937,6 +951,8 @@ class MeasurementGroupWorker:
                                     ),
                                 }
                             )
+                            if open_failure_evidence:
+                                refetches[-1]["failure_evidence"] = open_failure_evidence
                             self._emit(
                                 EventKind.OBSERVATION_REFETCHED,
                                 run_id,
@@ -954,6 +970,8 @@ class MeasurementGroupWorker:
                                 recoverable=True,
                             )
                         )
+                    if open_failure_evidence:
+                        issues[-1].setdefault("detail", {})["failure_evidence"] = open_failure_evidence
                     break
                 finally:
                     self._active_observations.discard(observation_id)
@@ -1312,6 +1330,22 @@ class MeasurementGroupWorker:
             return self.recovery.logical_id(observation_id, suffix)
         return f"{observation_id}:{suffix}"
 
+    async def _await_send_admission(self, run_id, observation_id, platform, profile_id):
+        if self.recovery is not None and platform == "copilot":
+            reason = await self.recovery.wait_for_active_blocker(self, profile_id, observation_id)
+            holds = self.recovery.verification_holds
+            retained = next((row for row in holds.store.rows(own_run=False)
+                if row['profile_id'] == profile_id
+                and observation_id not in row.get('active_item_ids', ())), None) if holds is not None else None
+            if retained is not None:
+                error_type = (HumanVerificationRequiredError
+                    if retained.get('blocker_kind', 'verification') == 'verification'
+                    else ProviderAccessBlockedError)
+                raise error_type("copilot_profile_blocker_retained",
+                    reason=reason or retained.get('reason') or 'copilot_profile_blocker_retained')
+        # No await follows this check before the fence's synchronous hold guard.
+        self._require_active_run(run_id)
+
     async def _conversational(
         self,
         run_id: str,
@@ -1467,7 +1501,7 @@ class MeasurementGroupWorker:
                 if not research:
                     source_text, _ = _read_attempt_response(self.repository, run_id, accepted_turn_1)
                     extraction_prompt = same_chat_extraction_prompt(
-                        source_text, expected_prompt_sha256=turn_2.prompt_sha256,
+                        source_text, platform=platform, expected_prompt_sha256=turn_2.prompt_sha256,
                     )
                 await _retry_backoff(
                     policy,
@@ -1496,7 +1530,7 @@ class MeasurementGroupWorker:
                         binding=self.recovery.correlation(turn_2.fence_id) if self.recovery is not None else None,
                     )
                     if native:
-                        self._require_active_run(run_id)
+                        await self._await_send_admission(run_id, observation_id, platform, profile_id)
                         successor = fences.prepare_retry(
                             confirmed_fence_id=turn_2.fence_id,
                             successor_fence_id=_send_attempt_id(
@@ -1596,7 +1630,7 @@ class MeasurementGroupWorker:
                         binding=self.recovery.correlation(turn_1.fence_id) if self.recovery is not None else None,
                     )
                     if native:
-                        self._require_active_run(run_id)
+                        await self._await_send_admission(run_id, observation_id, platform, profile_id)
                         turn_1 = fences.prepare_retry(
                             confirmed_fence_id=turn_1.fence_id,
                             successor_fence_id=_send_attempt_id(
@@ -1654,7 +1688,7 @@ class MeasurementGroupWorker:
                     and predecessor.state
                     is SendAttemptState.CONFIRMED_NO_RESPONSE
                 ):
-                    self._require_active_run(run_id)
+                    await self._await_send_admission(run_id, observation_id, platform, profile_id)
                     turn_1 = fences.prepare_retry(
                         confirmed_fence_id=predecessor.fence_id,
                         successor_fence_id=_send_attempt_id(
@@ -1669,7 +1703,7 @@ class MeasurementGroupWorker:
                         observation_attempt_ordinal=chat_ordinal,
                     )
                 else:
-                    self._require_active_run(run_id)
+                    await self._await_send_admission(run_id, observation_id, platform, profile_id)
                     turn_1 = fences.prepare(
                         fence_id=_send_attempt_id(
                             turn_1_logical_id,
@@ -1794,7 +1828,7 @@ class MeasurementGroupWorker:
                             and await _prepare_native_retry(submission)
                         )
                         if native:
-                            self._require_active_run(run_id)
+                            await self._await_send_admission(run_id, observation_id, platform, profile_id)
                             turn_1 = fences.prepare_retry(
                                 confirmed_fence_id=turn_1.fence_id,
                                 successor_fence_id=_send_attempt_id(
@@ -1833,6 +1867,7 @@ class MeasurementGroupWorker:
             if not research:
                 extraction_prompt = same_chat_extraction_prompt(
                     answer_text,
+                    platform=platform,
                     expected_prompt_sha256=turn_2.prompt_sha256 if turn_2 is not None else None,
                 )
 
@@ -1891,7 +1926,7 @@ class MeasurementGroupWorker:
                     is SendAttemptState.CONFIRMED_NO_RESPONSE
                     and _observation_attempt_ordinal(predecessor) == chat_ordinal
                 ):
-                    self._require_active_run(run_id)
+                    await self._await_send_admission(run_id, observation_id, platform, profile_id)
                     turn_2 = fences.prepare_retry(
                         confirmed_fence_id=predecessor.fence_id,
                         successor_fence_id=_send_attempt_id(
@@ -1908,7 +1943,7 @@ class MeasurementGroupWorker:
                         observation_attempt_ordinal=chat_ordinal,
                     )
                 else:
-                    self._require_active_run(run_id)
+                    await self._await_send_admission(run_id, observation_id, platform, profile_id)
                     turn_2 = fences.prepare(
                         fence_id=_send_attempt_id(
                             turn_2_logical_id,
@@ -2060,7 +2095,7 @@ class MeasurementGroupWorker:
                         and await _prepare_native_retry(submission)
                     )
                     if native:
-                        self._require_active_run(run_id)
+                        await self._await_send_admission(run_id, observation_id, platform, profile_id)
                         turn_2 = fences.prepare_retry(
                             confirmed_fence_id=turn_2.fence_id,
                             successor_fence_id=_send_attempt_id(
@@ -2113,6 +2148,10 @@ class MeasurementGroupWorker:
                         validation_status="rejected",
                         detail=str(exc),
                         identity=extraction_identity.to_mapping(),
+                    )
+                    await self._capture_send_failure(
+                        run_id, packet_id, terminal, submission, exc,
+                        phase="extraction_validation",
                     )
                     attempt_snapshot = fences.snapshot(observation_ids=(observation_id,))
                     if allow_restart and _can_restart_conversation(
@@ -2807,10 +2846,11 @@ class MeasurementGroupWorker:
         ) from access_error
 
     async def _capture_send_failure(
-        self, run_id: str, packet_id: str, fence: SendAttempt,
+        self, run_id: str, packet_id: str, fence: Optional[SendAttempt],
         submission: Submission, error: Exception, *, phase: str,
         deadline: Optional[float] = None,
-    ) -> None:
+        observation_id: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
         """Best-effort private evidence from the original owned page; no input."""
 
         until = time.monotonic() + 3.0
@@ -2828,17 +2868,33 @@ class MeasurementGroupWorker:
         except (Exception, asyncio.CancelledError):
             return  # Lost/unproven ownership forbids even a diagnostic page read.
         try:
-            durable = self._send_attempts(run_id).load(fence.fence_id) or fence
+            durable = (self._send_attempts(run_id).load(fence.fence_id) or fence) if fence else None
+            observation_id = fence.observation_id if fence else observation_id
+            if not observation_id:
+                return
             metadata = {
                 "schema_version": "visibility_runner.failure_dom.v1",
                 "run_id": run_id, "packet_id": packet_id,
-                "observation_id": fence.observation_id, "fence_id": fence.fence_id,
-                "action": fence.action, "phase": phase,
+                "observation_id": observation_id, "fence_id": fence.fence_id if fence else None,
+                "action": fence.action if fence else "provider_open", "phase": phase,
                 "captured_at": datetime.now(timezone.utc).isoformat(),
-                "response_baseline": durable.response_baseline,
+                "response_baseline": durable.response_baseline if durable else None,
                 "failure_context": _safe_failure_context(error, phase=phase),
                 "coherence": "unconfirmed", "html_status": "unavailable",
             }
+            if phase in {"provider_preparation", "provider_open"}:
+                metadata["preparation_stage"] = getattr(submission, "_preparation_phase", None)
+            marker = getattr(submission, "_last_access_block_marker", None)
+            if isinstance(marker, str):
+                metadata["last_access_block_marker"] = marker[:80]
+            dialog = getattr(page, "_visibility_runner_blocking_dialog", None)
+            if dialog is not None:
+                # Browser dialogs are outside the document HTML. Preserve the
+                # original notice privately without accepting or dismissing it.
+                metadata["browser_dialog"] = {
+                    "type": str(getattr(dialog, "type", "unknown"))[:40],
+                    "message": str(getattr(dialog, "message", ""))[:4000],
+                }
         except Exception:
             return
         try:
@@ -2868,6 +2924,26 @@ class MeasurementGroupWorker:
             html = sample["html"]
             metadata["page"] = {key: sample.get(key) for key in ("url", "timeOrigin")}
             metadata["html_status"] = "complete"
+            transcript_snapshot = getattr(submission, "failure_transcript_snapshot", None)
+            if callable(transcript_snapshot):
+                try:
+                    if await _await_call(assert_owned, until, _deadline=budget) is not True:
+                        raise IdentityMismatchError("failure transcript ownership unavailable")
+                    transcript = await _await_call(
+                        transcript_snapshot, deadline=until, _deadline=budget,
+                    )
+                    metadata["transcript"] = _bounded_failure_transcript(transcript)
+                    if durable is not None:
+                        metadata["transcript"]["matches_admitted_prompt"] = (
+                            metadata["transcript"]["rendered_user_sha256"] == durable.prompt_sha256
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as read_error:
+                    metadata["transcript"] = {
+                        "status": "unavailable",
+                        "failure_context": _safe_failure_context(read_error, phase="failure_transcript"),
+                    }
             checked = await _await_call(
                 locator.evaluate,
                 "element => ({url: location.href, timeOrigin: performance.timeOrigin})",
@@ -2889,6 +2965,10 @@ class MeasurementGroupWorker:
             return
         except Exception as capture_error:
             metadata["capture_error"] = _safe_failure_context(capture_error, phase="failure_capture")
+        if "transcript" in metadata:
+            # HTML and rendered transcript are successive bounded reads,
+            # never a claim that the DOM stayed unchanged between them.
+            metadata["transcript"]["document_coherence"] = metadata["coherence"]
         try:
             self._assert_execution()
             references = {}
@@ -2900,7 +2980,9 @@ class MeasurementGroupWorker:
                 run_id, json.dumps(metadata, ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n",
                 media_type="application/json", suffix=".failure.json",
             )
-            self._send_failure_evidence.setdefault(fence.fence_id, []).append(references)
+            if fence:
+                self._send_failure_evidence.setdefault(fence.fence_id, []).append(references)
+            return references
         except Exception:
             pass  # Diagnostics never replace the failure or interfere with cleanup.
 
@@ -3568,6 +3650,34 @@ def _bounded_usage_limit_metadata(value: Mapping[str, Any]) -> dict[str, object]
     return result
 
 
+def _bounded_failure_transcript(snapshot: object) -> dict[str, object]:
+    """Describe the existing rendered reader's result in private diagnostics."""
+    history = snapshot.history
+    prompt = snapshot.prompt_text
+    answer = snapshot.answer
+    result = {
+        "status": "captured",
+        "rendered_user_text": prompt[:8192],
+        "rendered_user_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "rendered_user_character_count": len(prompt),
+        "rendered_user_truncated": len(prompt) > 8192,
+        "logical_user_count": len(history.get("user_sha256", ())),
+        "logical_assistant_count": answer.count,
+        "answer_readability": "nonempty" if answer.text else "empty",
+        "latest_answer_sha256": hashlib.sha256(answer.text.encode("utf-8")).hexdigest(),
+        "history_complete": history.get("history_complete") is True,
+        "history_ambiguous": history.get("history_ambiguous") is True,
+        "generating": history.get("generating") is True,
+    }
+    for role in ("user", "assistant"):
+        identities = history.get(role + "_ids", ())
+        identifier = identities[-1] if identities else None
+        result["latest_" + role + "_id"] = identifier[:200] if isinstance(identifier, str) else None
+    branch = history.get("branch_id")
+    result["branch_id"] = branch[:200] if isinstance(branch, str) else None
+    return result
+
+
 def _reconciled_access_error(
     classification: Optional[str],
     evidence: Optional[Mapping[str, Any]] = None,
@@ -3593,12 +3703,12 @@ def _reconciled_access_error(
                 usage_limit = next((dict(check["usage_limit"]) for check in reversed(checks)
                     if isinstance(check, Mapping) and isinstance(check.get("usage_limit"), Mapping)
                     and project_blocking_usage_limit(check["usage_limit"]) is not None), None)
+        reason = classification.partition(":")[2]
+        if reason in {"", "authentication_redirect"}:
+            reason = "authentication_required"
         return ProviderAccessBlockedError(
             "provider access requires operator action",
-            reason=("unusual_activity"
-                if classification == "provider_access_blocked:unusual_activity"
-                else "usage_limit" if classification == "provider_access_blocked:usage_limit"
-                else "authentication_required"),
+            reason=reason,
             usage_limit=usage_limit,
         )
     return None
@@ -3613,9 +3723,7 @@ def _access_block_detail(
     human = isinstance(error, HumanVerificationRequiredError)
     reason = (
         "human_verification_required" if human
-        else "unusual_activity" if error.reason == "unusual_activity"
-        else "usage_limit" if error.reason == "usage_limit"
-        else "authentication_required"
+        else error.reason or "provider_access_blocked"
     )
     detail = {
         "user_action_required": True,
@@ -3686,11 +3794,8 @@ def _recorded_website_access_issue(
                 not isinstance(block, Mapping)
                 or block.get("profile_id") != profile_id
                 or block.get("provider") not in providers
-                or block.get("reason") not in {
-                    "authentication_required", "human_verification_required",
-                    "unusual_activity",
-                    "usage_limit",
-                }
+                or not isinstance(block.get("reason"), str)
+                or not block["reason"]
             ):
                 continue
             if block["reason"] == "usage_limit" and isinstance(block.get("usage_limit"), Mapping) and (

@@ -16,7 +16,7 @@ own append extends the verified view directly.
 from __future__ import annotations
 
 import base64
-import fcntl
+from platform_runtime import file_locks as fcntl
 import hashlib
 import json
 import os
@@ -263,7 +263,7 @@ class RecoveryLedger:
     def _read_bound(path):
         head = None
         try:
-            head = json.loads(path.read_text())
+            head = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
         if (not isinstance(head, dict)
@@ -306,7 +306,7 @@ class RecoveryLedger:
                 if not path.resolve().is_relative_to(root):
                     raise RecoveryIntegrityError("recovery_journal_path_escapes_run")
                 try:
-                    value = json.loads(path.read_text())
+                    value = json.loads(path.read_text(encoding="utf-8"))
                     if path == owner_path:
                         # Preserve ownership's established diagnostic and repair
                         # path instead of masking it as a journal failure.
@@ -458,7 +458,7 @@ class RecoveryLedger:
                 metadata = path.stat()
                 if watched is not None and watched != (metadata.st_dev, metadata.st_ino):
                     self.close()
-                value = json.loads(path.read_text())
+                value = json.loads(path.read_text(encoding="utf-8"))
                 if not isinstance(value, dict):
                     raise ValueError("journal record object required")
                 checksum = value.pop("checksum")
@@ -577,8 +577,10 @@ class RecoveryLedger:
             finally:
                 self._depth = 0
                 self._transaction_fresh = False
-                fcntl.flock(fd, fcntl.LOCK_UN)
-                os.close(fd)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(fd)
 
     def append(self, kind: str, payload: Mapping[str, Any], owner) -> Mapping[str, Any]:
         with self.transaction(owner):
@@ -610,7 +612,7 @@ class RecoveryLedger:
                 metadata = path.stat()
                 if watched is not None and watched != (metadata.st_dev, metadata.st_ino):
                     self.close()
-                published = json.loads(path.read_text())
+                published = json.loads(path.read_text(encoding="utf-8"))
                 if published != value or digest({key: item for key, item in published.items()
                                                 if key != "checksum"}) != value["checksum"]:
                     raise ValueError("published journal record changed")

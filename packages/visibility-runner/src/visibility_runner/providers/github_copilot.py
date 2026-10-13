@@ -15,11 +15,21 @@ import json
 import os
 from pathlib import Path
 import re
-import signal
 import sys
 import tempfile
 import uuid
 from typing import Any, Mapping
+
+from platform_runtime import file_locks as fcntl
+from platform_runtime.credentials import CredentialLookupError, resolve_reference
+from platform_runtime.processes import (
+    current_user_key,
+    isolated_environment_paths,
+    own_process_group,
+    popen_session_kwargs,
+    terminate_process_tree,
+)
+from platform_runtime.security import is_owned_private, protect_private
 
 from ..config import GITHUB_COPILOT_LEGACY_REQUEST_POLICY, GITHUB_COPILOT_REQUEST_POLICIES
 
@@ -70,29 +80,13 @@ class CopilotSourceError(RuntimeError):
 
 async def _credential(reference: str) -> str:
     """Resolve only the explicitly named credential. Never read dotenv or gh."""
-    if reference.startswith("env:"):
-        key = reference.removeprefix("env:")
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
-            raise CopilotSourceError("copilot_credential_ref_invalid")
-        token = os.environ.get(key, "").strip()
-    elif reference.startswith("keychain:"):
-        parts = reference.split(":", 2)
-        if sys.platform != "darwin" or len(parts) != 3 or not all(parts[1:]):
-            raise CopilotSourceError("copilot_credential_ref_invalid")
-        process = await asyncio.create_subprocess_exec(
-            "/usr/bin/security", "find-generic-password", "-s", parts[1],
-            "-a", parts[2], "-w", stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        try:
-            output, _ = await asyncio.wait_for(process.communicate(), 15)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            process.kill()
-            await process.wait()
-            raise CopilotSourceError("copilot_credential_unavailable") from None
-        token = output.decode("utf-8").strip() if process.returncode == 0 else ""
-    else:
-        raise CopilotSourceError("copilot_credential_ref_invalid")
+    try:
+        token = await resolve_reference(reference)
+    except CredentialLookupError as error:
+        code = {"reference_invalid": "copilot_credential_ref_invalid",
+                "unavailable": "copilot_credential_unavailable",
+                "invalid": "copilot_credential_invalid"}.get(error.code, "copilot_credential_unavailable")
+        raise CopilotSourceError(code) from None
     if not token:
         raise CopilotSourceError("copilot_credential_unavailable")
     if len(token) > 16384 or "\n" in token:
@@ -113,6 +107,8 @@ class GitHubCopilotSource:
         self.state_directory = Path(state_directory).expanduser().resolve()
         self.config = dict(config)
         self._process: asyncio.subprocess.Process | None = None
+        self._process_identity: Any = None
+        self._process_group: Any = None
         self._reader: asyncio.Task[None] | None = None
         self._stderr: asyncio.Task[None] | None = None
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
@@ -158,27 +154,36 @@ class GitHubCopilotSource:
             if not worker.is_file():
                 raise CopilotSourceError("copilot_worker_unavailable")
             self.state_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-            self.state_directory.chmod(0o700)
+            protect_private(self.state_directory, directory=True)
             # Deliberately exclude HOME, GitHub/Copilot credentials, NODE_OPTIONS,
             # SDK overrides, npm settings and ambient plugin/config variables.
             env = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL", "SYSTEMROOT") if key in os.environ}
-            env["HOME"] = str(self.state_directory / "home")
-            env["XDG_CONFIG_HOME"] = str(self.state_directory / "home" / ".config")
-            env["XDG_CACHE_HOME"] = str(self.state_directory / "cache")
-            env["TMPDIR"] = str(self.state_directory / "tmp")
+            env.update(isolated_environment_paths(
+                self.state_directory / "home", self.state_directory / "cache",
+                self.state_directory / "tmp",
+            ))
+            env["VISIBILITY_PLATFORM_PYTHON"] = sys.executable
+            env["VISIBILITY_PLATFORM_BRIDGE"] = str(Path(__file__).parent / "copilot_worker" / "platform_bridge.py")
             # The pinned in-process SDK runtime inherits its Node worker's
             # ambient environment; CopilotClient.env does not reach FFI.
             env["COPILOT_ENABLE_BUILTIN_GITHUB_MCP"] = "true" if method == "github_copilot_web_v1" else "false"
             for directory in ("home", "cache", "tmp", "workspace"):
                 (self.state_directory / directory).mkdir(mode=0o700, exist_ok=True)
+                protect_private(self.state_directory / directory, directory=True)
             try:
                 self._process = await asyncio.create_subprocess_exec(
                     str(self.config.get("node_binary") or "node"), str(worker),
                     cwd=self.state_directory / "workspace", env=env,
                     stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE, limit=MAX_MESSAGE_BYTES + 1,
-                    start_new_session=True,
+                    **popen_session_kwargs(),
                 )
+                import psutil
+                self._process_identity = psutil.Process(self._process.pid)
+                self._process_identity.create_time()
+                # The native group is owned before the first SDK command. Its
+                # Windows lease retains descendants even if the worker exits.
+                self._process_group = own_process_group(self._process)
                 self._reader = asyncio.create_task(self._read_responses())
                 self._stderr = asyncio.create_task(self._discard_stderr())
                 preflight = await self._command("initialize", {
@@ -206,16 +211,33 @@ class GitHubCopilotSource:
 
     def _acquire_account_lock(self, canonical_account_id: str) -> None:
         """Prevent another runner process/run from sending as this same account."""
-        import fcntl
         if not canonical_account_id:
             raise CopilotSourceError("copilot_account_identity_unproven")
-        directory = Path(tempfile.gettempdir()) / f"visibility-runner-copilot-locks-{os.getuid()}"
+        directory = Path(tempfile.gettempdir()) / f"visibility-runner-copilot-locks-{current_user_key()}"
         directory.mkdir(mode=0o700, exist_ok=True)
-        if directory.is_symlink() or directory.stat().st_uid != os.getuid():
+        try:
+            protect_private(directory, directory=True)
+        except OSError:
             raise CopilotSourceError("copilot_account_lock_invalid")
-        directory.chmod(0o700)
+        if not is_owned_private(directory, directory=True):
+            raise CopilotSourceError("copilot_account_lock_invalid")
         key = hashlib.sha256(canonical_account_id.encode("utf-8")).hexdigest()
-        fd = os.open(directory / f"{key}.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        path = directory / f"{key}.lock"
+        if path.is_symlink():
+            raise CopilotSourceError("copilot_account_lock_invalid")
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            # O_NOFOLLOW is unavailable on Windows. The private parent plus
+            # pathname/descriptor identity proves this remains the opened file.
+            before, opened = path.lstat(), os.fstat(fd)
+            if path.is_symlink() or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+                raise CopilotSourceError("copilot_account_lock_invalid")
+            protect_private(path)
+            if not is_owned_private(path):
+                raise CopilotSourceError("copilot_account_lock_invalid")
+        except BaseException:
+            os.close(fd)
+            raise
         handle = os.fdopen(fd, "r+")
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -353,22 +375,31 @@ class GitHubCopilotSource:
                 pass
         # The SDK runtime is a descendant in the worker's new process group.
         # Always reap that owned group, even if the worker itself already exited.
-        if process:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGTERM)
-            if process.returncode is None:
-                try:
-                    await asyncio.wait_for(process.wait(), 2)
-                except asyncio.TimeoutError:
-                    with contextlib.suppress(ProcessLookupError):
-                        os.killpg(process.pid, signal.SIGKILL)
-                    await process.wait()
+        try:
+            if process and self._process_identity is not None:
+                with contextlib.suppress(ProcessLookupError):
+                    terminate_process_tree(self._process_identity)
+                if process.returncode is None:
+                    try:
+                        await asyncio.wait_for(process.wait(), 2)
+                    except asyncio.TimeoutError:
+                        with contextlib.suppress(ProcessLookupError):
+                            terminate_process_tree(self._process_identity, force=True)
+                        await process.wait()
+        finally:
+            if self._process_group is not None:
+                self._process_group.close()
+                self._process_group = None
         for task in (self._reader, self._stderr):
             if task:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
         self._process = None
+        self._process_identity = None
         if self._account_lock is not None:
-            self._account_lock.close()
-            self._account_lock = None
+            try:
+                fcntl.flock(self._account_lock.fileno(), fcntl.LOCK_UN)
+            finally:
+                self._account_lock.close()
+                self._account_lock = None

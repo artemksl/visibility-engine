@@ -14,8 +14,6 @@ import os
 
 import re
 
-import signal
-
 import shutil
 
 import subprocess
@@ -36,6 +34,8 @@ from pathlib import Path
 
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
+from platform_runtime.processes import own_process_group, popen_session_kwargs, terminate_process_tree
+
 from visibility_panel.execution.measurement_platforms import (
     deferred_measurement_reason, require_active_measurement,
 )
@@ -52,7 +52,7 @@ from visibility_panel.persistence.json_store import read_json_or_none, write_jso
 
 from visibility_panel.execution.worker_registry import (
     RegistryError, WorkerRegistry, WorkerWatchdog, publish_json, read_record,
-    discover_legacy_worker,
+    discover_legacy_worker, process_identity, compare_identity, ProcessIdentity,
 )
 
 from visibility_panel.web.start_receipts import (
@@ -67,6 +67,19 @@ from visibility_panel.web.record_navigation import (
 
 from visibility_panel.web.config import selected_snapshot_profile_rows, load_settings
 from visibility_panel.integrations.visibility_selection import measurement_from_frozen_snapshot
+
+def _terminate_verified_child(process, expected: ProcessIdentity | None) -> bool:
+    """Never let a delayed Stop signal a reused PID or a different executable."""
+    if process.poll() is not None or expected is None or expected.pid != process.pid:
+        return False
+    try:
+        if compare_identity(expected, process_identity(process.pid)) != "alive":
+            return False
+        terminate_process_tree(process.pid, expected_created=expected.created, expected_executable=expected.executable)
+    except (RegistryError, OSError):
+        return False
+    return True
+
 
 REPO_ROOT = repo_root()
 
@@ -240,6 +253,7 @@ class JobStore:
         self._lock = threading.Lock()
         self._jobs: Dict[str, Job] = {}
         self._processes: Dict[str, subprocess.Popen] = {}
+        self._process_identities: Dict[str, ProcessIdentity | None] = {}
         self._stop_requests = set()
         self._runner_cancel_pending: set[tuple[str, str]] = set()
         self._preparing_executions: set[tuple[str, str]] = set()
@@ -348,11 +362,9 @@ class JobStore:
             job.stop_requested_at = stopped_at
             self._save(job)
             proc = self._processes.get(job_id)
-        if proc and proc.poll() is None:
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except Exception:
-                proc.terminate()
+            identity = self._process_identities.get(job_id)
+        if proc:
+            _terminate_verified_child(proc, identity)
         return self.get(job_id)
 
     def resume(self, job_id: str) -> Job:
@@ -1222,6 +1234,7 @@ class JobStore:
         job_dir = self.run_root / job.id
         log_path = self._log_path(job)
         spawn_status = "not_started"
+        process_group = None
         try:
             env.update(prepare_job_environment(workflow, job.run_config, self.repo_root, job_dir))
             with log_path.open("w", encoding="utf-8", newline="\n") as log:
@@ -1258,19 +1271,29 @@ class JobStore:
                     try:
                         proc = subprocess.Popen(
                             job.command, cwd=self.repo_root, env=env, stdout=log,
-                            stderr=subprocess.STDOUT, text=True, start_new_session=True,
+                            stderr=subprocess.STDOUT, text=True, **popen_session_kwargs(),
                         )
                     except OSError:
                         spawn_status = "not_started"
                         raise
                     spawn_status = "started"
+                    try:
+                        launched_identity = process_identity(proc.pid)
+                    except RegistryError:
+                        launched_identity = None
                     if registry is not None and execution_id:
                         registry.record_launch(execution_id, proc.pid)
+                    try:
+                        process_group = own_process_group(proc, allow_breakaway=True)
+                    except Exception:
+                        _terminate_verified_child(proc, launched_identity)
+                        raise
                     with self._lock:
                         current = self._jobs.get(job.id)
                         if current is None or current.run_config.get("runner_execution_id") != execution_id:
                             return
                         self._processes[job.id] = proc
+                        self._process_identities[job.id] = launched_identity
                         stop_requested = job.id in self._stop_requests
                         current.pid = proc.pid
                         if registry is not None:
@@ -1279,11 +1302,8 @@ class JobStore:
                         self._save(current)
                 if _job_is_runner_owned(job) and job.run_config.get("runner_execution_id"):
                     threading.Thread(target=self._monitor_execution, args=(job.id, job.run_config["runner_execution_id"]), daemon=True).start()
-                if stop_requested and proc.poll() is None:
-                    try:
-                        os.killpg(proc.pid, signal.SIGTERM)
-                    except Exception:
-                        proc.terminate()
+                if stop_requested:
+                    _terminate_verified_child(proc, launched_identity)
                 returncode = proc.wait()
             if _job_is_runner_owned(job):
                 execution_id = job.run_config.get("runner_execution_id")
@@ -1348,10 +1368,13 @@ class JobStore:
             else:
                 self._update_execution(job, status="failed", returncode=1, finished_at=utc_now())
         finally:
+            if process_group is not None:
+                process_group.close()
             with self._lock:
                 self._preparing_executions.discard((job.id, job.run_config.get("runner_execution_id")))
                 if self._jobs[job.id].run_config.get("runner_execution_id") == job.run_config.get("runner_execution_id"):
                     self._processes.pop(job.id, None)
+                    self._process_identities.pop(job.id, None)
                     self._stop_requests.discard(job.id)
 
     def _execution_is_current(self, job: Job) -> bool:
@@ -1966,8 +1989,9 @@ def normalize_run_config(run_config, workflow, repo_root_path=None):
     measurement = measurement_from_frozen_snapshot(provided.get('visibility_test'))
     settings = load_settings(repo_root_path)
     selected = provided.get('selected_profile_ids')
-    if selected != settings['selected_profile_ids']:
-        raise ValueError('The request must use the explicit local profile selection.')
+    if (not isinstance(selected, list) or not selected
+        or any(not isinstance(item, str) or item not in settings['selected_profile_ids'] for item in selected)):
+        raise ValueError('Select an explicit subset of the configured local profiles.')
     rows = selected_snapshot_profile_rows(selected, repo_root_path)
     return {**copy.deepcopy(DEFAULT_RUN_CONFIG), **provided, 'regime': 'logged_in',
             'selected_profile_ids': selected, 'selected_profiles': selected,

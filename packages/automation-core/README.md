@@ -1,4 +1,4 @@
-# Shared Automation Core 0.1.2
+# Shared Automation Core 0.1.3
 
 This source snapshot is the exact core release used by the Visibility Runner
 0.2.55. Install it through [the root setup instructions](../../README.md).

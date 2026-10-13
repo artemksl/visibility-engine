@@ -13,6 +13,10 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from platform_runtime.paths import chrome_binary, chrome_user_data_dir
+from platform_runtime.processes import popen_session_kwargs, process_is_current_user
+from platform_runtime.storage import publish_complete, sync_file
+
 from visibility_panel.integrity import canonical_sha256
 from visibility_panel.web.config import selected_snapshot_profile_rows
 
@@ -103,8 +107,11 @@ def _browser_paths(root: Path, runtime: dict) -> tuple[Path, Path]:
     # values. Mirror that precedence so a directory name cannot select an
     # account in a different Chrome user-data root.
     browser = runtime.get("browser") or {}
-    binary = values.get("BROWSER_CMD") or "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    user_data = browser.get("user_data_dir") or browser.get("chrome_user_data_dir") or values.get("CHROME_USER_DATA_DIR") or str(Path.home() / "Library/Application Support/Google/Chrome")
+    try:
+        binary = values.get("BROWSER_CMD") or str(chrome_binary())
+        user_data = browser.get("user_data_dir") or browser.get("chrome_user_data_dir") or values.get("CHROME_USER_DATA_DIR") or str(chrome_user_data_dir())
+    except (OSError, RuntimeError) as exc:
+        raise RecordNavigationError("browser_unavailable", "Chrome's configured location cannot be verified.") from exc
     paths = tuple(Path(str(value).replace("${HOME}", str(Path.home())).replace("$HOME", str(Path.home()))).expanduser() for value in (binary, user_data))
     if any(not path.is_absolute() for path in paths):
         raise RecordNavigationError("browser_unavailable", "Chrome's configured location cannot be verified.")
@@ -124,6 +131,8 @@ def _chrome_running(binary: Path, user_data: Path) -> bool:
             executable = row.get("exe")
             if row.get("name") != binary.name and executable != str(binary):
                 continue
+            if not process_is_current_user(process):
+                continue
             if not executable or not row.get("cmdline"):
                 raise ValueError("Chrome process identity is unreadable")
             args = row["cmdline"]
@@ -135,7 +144,7 @@ def _chrome_running(binary: Path, user_data: Path) -> bool:
                     directories.append(args[index + 1])
             if len(directories) > 1:
                 raise ValueError("ambiguous Chrome directory")
-            directory = Path(directories[0]).expanduser() if directories else Path.home() / "Library/Application Support/Google/Chrome"
+            directory = Path(directories[0]).expanduser() if directories else chrome_user_data_dir()
             if directory.resolve() == user_data.resolve():
                 if Path(executable).resolve() != binary.resolve():
                     raise ValueError("another Chrome executable owns the selected directory")
@@ -163,11 +172,11 @@ def _prepare_cold_start(user_data: Path, directory: str) -> None:
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=user_data,
                                          prefix=".record-inspection-", delete=False) as stream:
             temporary = Path(stream.name)
-            os.fchmod(stream.fileno(), state_path.stat().st_mode & 0o777)
+            os.chmod(temporary, state_path.stat().st_mode & 0o777)
             json.dump(state, stream, ensure_ascii=False, separators=(",", ":"))
             stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, state_path)
+            sync_file(stream.fileno())
+        publish_complete(temporary, state_path)
     except (OSError, ValueError, TypeError, AttributeError) as exc:
         raise RecordNavigationError("browser_unavailable", "Chrome's saved startup profiles cannot be verified. Open the selected profile manually and try again.") from exc
     finally:
@@ -189,7 +198,7 @@ def launch_inspection(*, root: Path, runtime: dict, profile: dict, url: str) -> 
             [str(binary), f"--user-data-dir={user_data}", f"--profile-directory={profile['chrome_directory']}",
              "--new-window", url],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            **popen_session_kwargs(persistent=True),
         )
         # Existing Chrome hands the URL to its process and exits. A newly
         # opened Chrome stays running; neither case needs a browser connection.

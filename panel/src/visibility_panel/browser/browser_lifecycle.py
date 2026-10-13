@@ -5,8 +5,8 @@ the one destructive resource shared by every identity on a CDP endpoint: the
 persistent Chrome process itself.  Browser-driving runs hold a shared lease;
 code that may quit or launch Chrome must hold the exclusive form.
 
-The implementation is intentionally stdlib-only so the shell launchers can use
-this file as a small wrapper before they touch Chrome.
+The OS lock implementation lives in platform_runtime so both launchers and
+workers use the same shared/exclusive lifecycle protocol.
 """
 
 from __future__ import annotations
@@ -21,10 +21,13 @@ import sys
 import tempfile
 from typing import Callable, Iterator, Mapping, Optional, Sequence
 
-try:  # Unix/macOS production path.
-    import fcntl
-except ImportError:  # pragma: no cover - persistent Chrome is not run on Windows.
-    fcntl = None
+# The legacy macOS shell launcher invokes this helper directly. Resolve the
+# bundled OS package in that case without depending on global installation.
+if __name__ == "__main__" and not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "packages/platform-runtime/src"))
+
+from platform_runtime import file_locks as fcntl
+from platform_runtime.processes import current_user_key
 
 
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
@@ -59,10 +62,7 @@ def browser_lifecycle_lock_path(
     root_value = str(values.get(LOCK_ROOT_ENV) or "").strip()
     root = Path(root_value).expanduser() if root_value else DEFAULT_LOCK_ROOT
     endpoint = str(cdp_url or values.get("CDP_URL") or DEFAULT_CDP_URL).strip().rstrip("/")
-    try:
-        user_key = str(os.getuid())
-    except AttributeError:  # pragma: no cover - Windows fallback for path stability.
-        user_key = str(values.get("USERNAME") or values.get("USER") or "unknown")
+    user_key = current_user_key()
     digest = hashlib.sha256(f"{user_key}\0{endpoint}".encode("utf-8")).hexdigest()[:24]
     return (root / f"{digest}.lock").resolve()
 
@@ -84,12 +84,6 @@ class BrowserLifecycleLease:
     def active(self) -> bool:
         return self._handle is not None and self._mode != "released"
 
-    def _require_fcntl(self) -> None:
-        if fcntl is None:  # pragma: no cover - see import guard above.
-            raise BrowserLifecycleLockError(
-                "Persistent Chrome lifecycle locking requires Unix advisory locks."
-            )
-
     def _open(self) -> None:
         if self._handle is not None:
             return
@@ -97,7 +91,6 @@ class BrowserLifecycleLease:
         self._handle = self.path.open("a+", encoding="utf-8")
 
     def acquire_shared(self, *, blocking: bool = True) -> None:
-        self._require_fcntl()
         if self.active:
             raise BrowserLifecycleLockError("Browser lifecycle lease is already active")
         self._open()
@@ -114,7 +107,6 @@ class BrowserLifecycleLease:
         self._mode = "shared"
 
     def acquire_exclusive(self, *, on_wait: Optional[Callable[[], object]] = None) -> None:
-        self._require_fcntl()
         if self.active:
             raise BrowserLifecycleLockError("Browser lifecycle lease is already active")
         self._open()
@@ -149,7 +141,6 @@ class BrowserLifecycleLease:
         still in preflight at that point and has launched no provider work.
         """
 
-        self._require_fcntl()
         if self._mode == "exclusive":
             self._exclusive_depth += 1
             try:
@@ -199,8 +190,7 @@ class BrowserLifecycleLease:
             self._mode = "released"
             return
         try:
-            if fcntl is not None:
-                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
         finally:
             self._handle.close()
             self._handle = None

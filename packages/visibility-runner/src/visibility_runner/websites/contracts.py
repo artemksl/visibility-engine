@@ -338,15 +338,19 @@ class PageProviderSpec:
     composer_selectors: tuple[str, ...]
     send_selectors: tuple[str, ...]
     answer_selectors: tuple[str, ...]
+    # Exact provider panels that may hide the composer. Dismiss only when
+    # no configured composer is visible, before preparing an unsent turn.
+    composer_obstruction_close_selectors: tuple[str, ...] = ()
+    # Known view parameters whose closed panel can leave the composer hidden.
+    # Restore only an already bound conversation, never a fresh or sent turn.
+    composer_obstruction_view_query_parameters: tuple[str, ...] = ()
     response_node_selectors: tuple[str, ...] = ()
     user_message_selectors: tuple[str, ...] = ()
     rendered_user_label_selectors: tuple[str, ...] = ()
     stop_selectors: tuple[str, ...] = ()
     blocked_markers: tuple[str, ...] = ()
-    terminal_error_selectors: tuple[str, ...] = ()
     terminal_error_within_response_selectors: tuple[str, ...] = ()
     terminal_error_markers: tuple[str, ...] = ()
-    native_retry_selectors: tuple[str, ...] = ()
     native_retry_within_response_selectors: tuple[str, ...] = ()
     conversation_url_prefixes: tuple[str, ...] = ()
     rendered_answer_label_selectors: tuple[str, ...] = ()
@@ -360,11 +364,20 @@ class PageProviderSpec:
     unauthenticated_control_selectors: tuple[str, ...] = ()
     other_blocker_selectors: tuple[str, ...] = ()
     cookie_notice_selectors: tuple[str, ...] = ()
+    cookie_reject_selectors: tuple[str, ...] = ()
+    optional_notice_dismiss_selectors: tuple[str, ...] = ()
     response_content_selectors: tuple[str, ...] = ()
+    # Website-owned decorations may precede model content, such as a code
+    # block's language/copy toolbar. Remove only a DOM-proven leading node.
+    response_content_decoration_selectors: tuple[str, ...] = ()
     collapse_nested_message_aliases: bool = False
     # Optional semantic metadata on a message's nearest owning ancestor.
     response_turn_state_attribute: str = ""
     current_turn_owner_selector: str = ""
+    # Some sites put a live quota banner outside the individual message turn.
+    # Notice scope must not change response grouping or transcript counts.
+    current_turn_notice_owner_selector: str = ""
+    current_turn_notice_selectors: tuple[str, ...] = ('[role="alert"]', '[role="status"]')
     message_id_ancestor_attribute: str = ""
     # Message ids the website shows only while it is still writing an answer
     # and replaces once the answer is complete. Such an id is read as unknown

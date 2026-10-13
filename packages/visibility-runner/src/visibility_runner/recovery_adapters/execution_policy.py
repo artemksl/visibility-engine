@@ -53,7 +53,7 @@ def read_policy(repository,run_id,plan,*,runtime=None,state=None):
     path=repository.run_dir(run_id)/FILENAME
     required=(state or {}).get('execution_policy_sha256')
     try:
-        value=json.loads(path.read_text())
+        value=json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         if required:
             raise IntegrityError('frozen_execution_policy_missing') from None
@@ -114,7 +114,7 @@ def publish_policy(repository,run_id,policy,owner):
         state=repository.read_progress(run_id)
         repository.write_execution_control(run_id,state)
     if path.exists():
-        if json.loads(path.read_text())!=policy:
+        if json.loads(path.read_text(encoding="utf-8"))!=policy:
             raise IntegrityError('frozen_execution_policy_changed')
     else:
         publish_json(path,policy,exclusive=True)

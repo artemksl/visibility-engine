@@ -12,8 +12,8 @@ def browser_account_bindings(root, selected_profiles):
     path = root / "config" / "copilot-sign-in.json"
     if not path.exists():
         return {}  # Unconfigured callers retain sign-in for manual attention.
-    value = json.loads(path.read_text())
-    routine = json.loads((root / "config/profiles.json").read_text())
+    value = json.loads(path.read_text(encoding="utf-8"))
+    routine = json.loads((root / "config/profiles.json").read_text(encoding="utf-8"))
     directories = {row["id"]: row["chrome_directory"] for row in routine}
     if (not isinstance(value, dict) or value.get("schema_version") != 1
             or not isinstance(value.get("account_emails"), dict)):

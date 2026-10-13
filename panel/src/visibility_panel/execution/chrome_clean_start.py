@@ -11,6 +11,13 @@ from pathlib import Path
 import sys
 import tempfile
 
+# The legacy macOS shell launcher invokes this helper directly. Resolve the
+# bundled OS package in that case without depending on global installation.
+if __name__ == "__main__" and not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "packages/platform-runtime/src"))
+
+from platform_runtime.storage import publish_complete, sync_file
+
 
 def preferences(root: Path, directories: list[str]):
     rows = []
@@ -44,8 +51,8 @@ def prepare(root: Path, directories: list[str], *, validate_only=False):
                 os.chmod(temporary, path.stat().st_mode & 0o777 if path.exists() else 0o600)
                 json.dump(body, handle, separators=(",", ":"))
                 handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
+                sync_file(handle.fileno())
+            publish_complete(temporary, path)
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)

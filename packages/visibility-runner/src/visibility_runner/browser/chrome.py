@@ -16,6 +16,8 @@ import subprocess
 from typing import Any, Mapping, Optional, Protocol, Sequence, TYPE_CHECKING
 from urllib.parse import urlsplit
 
+from platform_runtime.processes import popen_session_kwargs
+
 from ..errors import (
     BrowserRuntimeError as _CoreBrowserRuntimeError,
     BrowserUnavailableError as _CoreBrowserUnavailableError,
@@ -181,7 +183,7 @@ class SubprocessChromeLauncher:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                start_new_session=True,
+                **popen_session_kwargs(persistent=True),
             )
         except OSError as exc:
             raise ChromeLaunchError(f"could not launch Chrome: {exc}") from exc
@@ -223,7 +225,7 @@ class CommandChromeLauncher:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                start_new_session=True,
+                **popen_session_kwargs(persistent=True),
             )
         except OSError as exc:
             raise ChromeLaunchError(

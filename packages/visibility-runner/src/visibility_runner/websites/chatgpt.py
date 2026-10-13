@@ -84,11 +84,6 @@ CHATGPT_SPEC = PageProviderSpec(
         'button[data-testid="login-button"]',
         'button[data-testid="signup-button"]',
     )),
-    terminal_error_selectors=(
-        '[data-message-author-role="assistant"] [role="alert"]',
-        '[data-message-author-role="assistant"] .text-token-text-error',
-        '[data-message-author-role="assistant"] [class*="text-token-text-error"]',
-    ),
     terminal_error_within_response_selectors=(
         '[role="alert"]',
         '.text-token-text-error',
@@ -102,11 +97,6 @@ CHATGPT_SPEC = PageProviderSpec(
     ),
     # Every selector is scoped beneath an assistant turn so a toolbar action
     # for an older answer cannot authorize native regeneration.
-    native_retry_selectors=(
-        '[data-message-author-role="assistant"] [role="alert"] button:has-text("Retry")',
-        '[data-message-author-role="assistant"] .text-token-text-error button:has-text("Retry")',
-        '[data-message-author-role="assistant"] [class*="text-token-text-error"] button:has-text("Try again")',
-    ),
     native_retry_within_response_selectors=(
         '[role="alert"] button:has-text("Retry")',
         '.text-token-text-error button:has-text("Retry")',

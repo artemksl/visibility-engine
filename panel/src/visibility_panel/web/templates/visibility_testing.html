@@ -47,6 +47,11 @@
                 <input id="visibilityTestCount" type="number" min="1" step="1" value="1" inputmode="numeric" aria-describedby="visibilityTestCountHelp">
               </label>
             </div>
+            <fieldset id="visibilityTestProfiles" class="visibility-test-profiles" aria-describedby="visibilityTestProfilesHelp">
+              <legend>Profiles</legend>
+              <div id="visibilityTestProfileChoices"><span class="muted">Loading configured profiles…</span></div>
+              <p id="visibilityTestProfilesHelp" class="muted">Uncheck blocked profiles before starting a new test. Saved runs retain their original profiles.</p>
+            </fieldset>
             <div id="visibilityTestRepeatFields">
               <label>Prompt
                 <textarea id="visibilityTestPrompt" rows="3">Recommend good clinics for laser hair removal in Marylebone.</textarea>

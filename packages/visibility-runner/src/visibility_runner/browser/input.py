@@ -20,6 +20,8 @@ from typing import Awaitable, Callable, Optional, Protocol
 
 from ..errors import (
     ComposerInputMismatchError as _CoreComposerInputMismatchError,
+    IdentityMismatchError,
+    ProviderAccessBlockedError,
     ProviderError as _CoreProviderError,
 )
 
@@ -616,6 +618,7 @@ async def write_exact_composer_input(
     clear: Optional[Callable[[object], object]] = None,
     write: Optional[Callable[[object, str], object]] = None,
     read: Optional[Callable[[object], object]] = None,
+    clear_before_write: bool = True,
 ) -> ComposerInputReceipt:
     """Prepare and prove an exact composer value before any send.
 
@@ -623,6 +626,9 @@ async def write_exact_composer_input(
     send attempt says no send has started.  The function itself never invokes a
     submit control.  On final failure, one typed pre-send record is delivered
     to the recorder before the corresponding typed exception is raised.
+    A replacing native Fill needs no preliminary keyboard clear; callers using
+    that input contract set ``clear_before_write=False``. Appending typing keeps
+    the default clear, including before each bounded refill attempt.
     """
 
     if not isinstance(prompt, str):
@@ -661,7 +667,10 @@ async def write_exact_composer_input(
             raise _exception(failure)
 
         try:
-            await _await_if_needed(clear_operation(composer))
+            if clear_before_write:
+                await _await_if_needed(clear_operation(composer))
+        except (IdentityMismatchError, ProviderAccessBlockedError):
+            raise
         except Exception as exc:
             last_failure = _failure(
                 kind=ComposerFailureKind.CLEAR_FAILED,
@@ -687,12 +696,14 @@ async def write_exact_composer_input(
                     expected=prompt,
                     observed=None,
                     send_started=True,
-                    detail="composer write refused because send started after clear",
+                    detail="composer write refused because send started before write",
                 )
                 await _record(recorder, failure)
                 raise _exception(failure)
             try:
                 await _await_if_needed(write_operation(composer, prompt))
+            except (IdentityMismatchError, ProviderAccessBlockedError):
+                raise
             except Exception as exc:
                 last_failure = _failure(
                     kind=ComposerFailureKind.WRITE_FAILED,
@@ -726,6 +737,8 @@ async def write_exact_composer_input(
                     observed_value = await _await_if_needed(
                         read_operation(composer)
                     )
+                except (IdentityMismatchError, ProviderAccessBlockedError):
+                    raise
                 except Exception as exc:
                     observed = None
                     last_failure = _failure(

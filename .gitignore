@@ -27,3 +27,7 @@ audit-results/
 *.log
 Walkthrough Captures/
 
+# Local qualification records contain real account/profile and run identifiers.
+docs/*live-repair*.md
+docs/gemini-design-repair-2026-10-13.md
+

@@ -277,8 +277,8 @@ class AccountMemory:
 
     @staticmethod
     def _private_file(path):
-        info = path.lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        from platform_runtime.security import is_owned_private
+        if not is_owned_private(path):
             raise StorageFailure()
 
     @staticmethod
@@ -305,7 +305,8 @@ class AccountMemory:
         try:
             root, folder, path, marker_path = cls._paths(state_dir, scope, ownership)
             folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-            folder.chmod(0o700)
+            from platform_runtime.security import protect_private, open_no_follow
+            protect_private(folder, directory=True)
             if marker_path.exists() or path.exists() or (folder/"verification.json").exists() or tuple(folder.glob("*.sqlite*")):
                 raise TransitionDenied(c.StopReason.LEGACY_STATE_BLOCKED)
             try: LegacyStateGuard(root,scope,ownership).check()
@@ -314,7 +315,7 @@ class AccountMemory:
             marker = dict(version=1,state="initializing",schema_version=2,account_key=scope.account_key,
                           store_uuid=uuid4().hex,database=path.name)
             _save(marker_path,marker)
-            descriptor = os.open(path,os.O_CREAT|os.O_EXCL|os.O_RDWR|os.O_NOFOLLOW,0o600)
+            descriptor = open_no_follow(path,os.O_CREAT|os.O_EXCL|os.O_RDWR,0o600)
             os.close(descriptor)
             connection = cls._connect(path)
             connection.execute("BEGIN IMMEDIATE")
@@ -328,9 +329,8 @@ class AccountMemory:
             connection.close(); connection = None
             from automation_core.storage.legacy_state import _validate_migration_candidate
             _validate_migration_candidate(path,root,scope,ownership,marker["store_uuid"])
-            descriptor=os.open(path,os.O_RDONLY)
-            try: os.fsync(descriptor)
-            finally: os.close(descriptor)
+            from platform_runtime.storage import sync_path
+            sync_path(path)
             _save(marker_path,dict(marker,state="ready"))
         except TransitionDenied:
             raise
@@ -356,7 +356,7 @@ class AccountMemory:
         try:
             self.root,folder,self.path,marker_path=cls._paths(state_dir,scope,ownership)
             self._private_file(marker_path); self._private_file(self.path)
-            marker=json.loads(marker_path.read_text())
+            marker=json.loads(marker_path.read_text(encoding="utf-8"))
             if (set(marker)!=_MARKER_FIELDS or marker["version"]!=1 or marker["schema_version"]!=2
                     or marker["state"]!="ready" or marker["account_key"]!=scope.account_key or marker["database"]!=self.path.name):
                 raise StorageFailure()

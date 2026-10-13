@@ -7,10 +7,68 @@ from __future__ import annotations
 
 import hashlib
 import threading
+from dataclasses import dataclass, field
 
 from ..errors import StateTransitionError
 from .profile_access import read_verification_marker
 from .verification_controls import control, store_for_runtime
+
+
+@dataclass
+class RestartAuthorization:
+    """One startup request's context rebind permission, never send authority."""
+
+    request_id: str
+    owner: object
+    profiles: frozenset[tuple[str, str]]
+    browser_session_id: str = ""
+    contexts: frozenset[tuple[str, str, str]] = field(default_factory=frozenset)
+
+
+def attachment_rebind_authorizer(repository, attachment):
+    """Reuse a restart receipt only in its owner's verified browser generation."""
+    session = repository.active_session
+    receipt = session.restart_authorization if session is not None else None
+    if receipt is None:
+        return None
+    try:
+        if session.owner is not receipt.owner:
+            raise StateTransitionError("browser_restart_owner_changed")
+        receipt.owner.assert_owned()
+        generation = str(getattr(getattr(attachment, "attached_health", None), "browser_session_id", "") or "")
+        anchors = getattr(getattr(attachment, "session", None), "anchors", ())
+        contexts = frozenset((anchor.profile.id, anchor.profile.chrome_directory,
+                              str(anchor.browser_context_id or "")) for anchor in anchors)
+        if (not generation or {row[:2] for row in contexts} != receipt.profiles
+                or any(not row[2] for row in contexts)):
+            session.restart_authorization = None
+            return None
+        if receipt.browser_session_id:
+            if generation != receipt.browser_session_id or contexts != receipt.contexts:
+                raise StateTransitionError("browser_restart_generation_changed")
+        else:
+            receipt.browser_session_id, receipt.contexts = generation, contexts
+    except BaseException:
+        session.restart_authorization = None
+        raise
+
+    def authorize(profile_id, chrome_directory, browser_context_reference):
+        if (repository.active_session is not session or session.owner is not receipt.owner
+                or session.restart_authorization is not receipt):
+            if session.restart_authorization is receipt:
+                session.restart_authorization = None
+            return False
+        try:
+            receipt.owner.assert_owned()
+        except Exception:
+            session.restart_authorization = None
+            raise
+        if (profile_id, chrome_directory, browser_context_reference) not in receipt.contexts:
+            session.restart_authorization = None
+            return False
+        return True
+
+    return authorize
 
 
 def prepare(runner, *, request_id, recovery_request=None):
@@ -21,6 +79,9 @@ def prepare(runner, *, request_id, recovery_request=None):
     original = None
     admitted = None
     runner._restart_recovery_request = None
+    session = runner.repository.active_session
+    if session is not None:
+        session.restart_authorization = None
     if recovery_request is not None:
         from ..recovery.api import RecoveryRequest
         from ..recovery.contracts import digest as request_digest
@@ -96,7 +157,10 @@ def prepare(runner, *, request_id, recovery_request=None):
         closed.append(row["episode_id"])
     # The owned profile factory may rebind saved-history retrieval to this
     # profile's new context after the host restart, never strict live Resume.
-    runner._browser_restart_profiles = frozenset((p.id, p.chrome_directory) for p in profiles.values())
+    if session is not None and session.owner is not None:
+        session.owner.assert_owned()
+        session.restart_authorization = RestartAuthorization(request_id, session.owner,
+            frozenset((p.id, p.chrome_directory) for p in profiles.values()))
     result = {"closed_verification_episodes": closed}
     # An admitted pass keeps its immutable selection, including blocked work.
     # Tab disposition alone cannot turn that selection into new send authority.

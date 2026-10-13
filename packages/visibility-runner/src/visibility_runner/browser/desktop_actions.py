@@ -17,15 +17,16 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-import fcntl
+from platform_runtime import file_locks as fcntl
 import math
 import os
 from pathlib import Path
 import queue
-import sys
 import threading
 import time
 from typing import Any, Awaitable, Callable, Hashable
+
+from platform_runtime.paths import user_cache_dir
 
 
 class DesktopActionError(RuntimeError):
@@ -50,8 +51,7 @@ class DesktopActionTimeout(DesktopActionError, TimeoutError):
 
 def default_desktop_lock_path() -> Path:
     """One stable user lock, independent of run ID, profile, and repository."""
-    cache = Path.home() / ("Library/Caches" if sys.platform == "darwin" else ".cache")
-    return cache / "visibility-runner" / "desktop-actions.lock"
+    return user_cache_dir() / "visibility-runner" / "desktop-actions.lock"
 
 
 class _Lease:

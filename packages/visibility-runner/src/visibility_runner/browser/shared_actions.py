@@ -13,9 +13,11 @@ import sys
 import random
 from typing import Any
 
-from automation_core.browser.async_actions import AsyncActionExecutor
+from automation_core.browser.async_actions import AsyncActionExecutor, AsyncActionError
 from automation_core.browser.movement import Policy
 from automation_core.contracts import SensitiveValue
+
+from ..errors import IdentityMismatchError, ProviderAccessBlockedError
 
 
 @dataclass(frozen=True)
@@ -75,20 +77,36 @@ class SharedBrowserActions:
         for target in targets:
             await self.executor.release(target.native)
 
+    async def _preserve_preparation_refusal(self, operation):
+        try:
+            return await operation
+        except AsyncActionError as error:
+            # The pinned executor sanitizes callback failures but retains their
+            # typed context. Restore known runner refusals only before input.
+            receipt, cause = error.receipt, error.__context__
+            if (receipt.status == "not_attempted" and receipt.phase == "preparation"
+                    and not receipt.possibly_dispatched
+                    and isinstance(cause, (IdentityMismatchError, ProviderAccessBlockedError))):
+                raise cause from None
+            raise
+
     async def clear(self, target: RetainedActionTarget, deadline: float, verify) -> None:
         # Target-local keyboard input preserves each provider's editor events.
-        await self.executor.press(target.native, "Meta+A" if sys.platform == "darwin" else "Control+A", deadline, verify=verify)
-        await self.executor.press(target.native, "Backspace", deadline, verify=verify)
+        await self._preserve_preparation_refusal(self.executor.press(target.native,
+            "Meta+A" if sys.platform == "darwin" else "Control+A", deadline, verify=verify))
+        await self._preserve_preparation_refusal(
+            self.executor.press(target.native, "Backspace", deadline, verify=verify))
 
     async def write(self, target: RetainedActionTarget, text: str, deadline: float,
                     verify, *, sequential: bool, min_delay_ms=0., max_delay_ms=0.) -> None:
         sensitive = SensitiveValue(text)
         try:
             if sequential:
-                await self.executor.type_text(target.native, sensitive, deadline,
-                    verify=verify, min_delay_ms=min_delay_ms, max_delay_ms=max_delay_ms)
+                await self._preserve_preparation_refusal(self.executor.type_text(target.native, sensitive, deadline,
+                    verify=verify, min_delay_ms=min_delay_ms, max_delay_ms=max_delay_ms))
             else:
-                await self.executor.fill(target.native, sensitive, deadline, verify=verify)
+                await self._preserve_preparation_refusal(
+                    self.executor.fill(target.native, sensitive, deadline, verify=verify))
         finally:
             sensitive.clear()
 

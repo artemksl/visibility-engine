@@ -1,0 +1,31 @@
+name: Shared engine platform checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  offline:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    env:
+      VISIBILITY_ENGINE_ROOT: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python setup.py --with-tests --desktop-verification
+      - name: Windows offline suite
+        if: runner.os == 'Windows'
+        run: .\.venv\Scripts\python.exe -m pytest -c packages/platform-runtime/pyproject.toml -q packages/platform-runtime/tests packages/automation-core/tests panel/tests packages/visibility-runner/tests/test_platform_runtime_boundary.py packages/visibility-runner/tests/test_github_copilot_credentials.py
+      - name: macOS offline suite
+        if: runner.os == 'macOS'
+        run: .venv/bin/python -m pytest -c packages/platform-runtime/pyproject.toml -q packages/platform-runtime/tests packages/automation-core/tests panel/tests packages/visibility-runner/tests/test_platform_runtime_boundary.py packages/visibility-runner/tests/test_github_copilot_credentials.py

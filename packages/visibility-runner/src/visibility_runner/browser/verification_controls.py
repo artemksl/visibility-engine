@@ -21,14 +21,36 @@ class _ControlComplete(Exception):
 
 
 async def _exact_page(attachment, page, row, deadline, *, conversation=True):
-    from ..websites.chat_actions import BrowserIdentity, strict_page_identity, _canonical_reference
+    from ..websites.chat_actions import (
+        BrowserIdentity, strict_page_identity, _canonical_reference, _is_blank_provider_start_url,
+        _is_authentication_url,
+    )
     from ..websites.copilot import COPILOT_SPEC
     if attachment.attached_health.browser_session_id != row["browser_session_id"]:
         raise IdentityMismatchError("verification_browser_generation_changed")
     observed = await strict_page_identity(page, profile_id=row["profile_id"],
         chrome_directory=row["identity"]["chrome_directory"], _deadline=deadline)
-    BrowserIdentity.from_mapping(row["identity"]).assert_same_tab(observed,
-        require_same_conversation=conversation and row.get("blocker_kind", "verification") != "sign_in",
+    expected = BrowserIdentity.from_mapping(row["identity"])
+    fresh_preparation = (
+        conversation and row.get("phase") == "preparation"
+        and row.get("dispatch_state") == "not_admitted"
+        and _is_blank_provider_start_url(expected.conversation_reference, COPILOT_SPEC.start_url,
+            aliases=COPILOT_SPEC.blank_start_url_aliases)
+    )
+    preparation_sign_in = (
+        conversation and row.get("phase") == "preparation"
+        and row.get("dispatch_state") == "not_admitted"
+        and row.get("blocker_kind") == "sign_in"
+        and _is_authentication_url(observed.conversation_reference,
+            COPILOT_SPEC.authentication_url_prefixes)
+    )
+    if fresh_preparation and not _is_blank_provider_start_url(
+        observed.conversation_reference, COPILOT_SPEC.start_url,
+        aliases=COPILOT_SPEC.blank_start_url_aliases,
+    ) and not preparation_sign_in:
+        raise IdentityMismatchError("verification_preparation_route_changed")
+    expected.assert_same_tab(observed,
+        require_same_conversation=conversation and not fresh_preparation and not preparation_sign_in,
         canonical=lambda url: _canonical_reference(url, COPILOT_SPEC))
     return observed
 

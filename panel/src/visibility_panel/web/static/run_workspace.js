@@ -617,7 +617,7 @@ function renderFailureReadout(container, readout, jobId) {
   const actionName = (item) => item.status === "succeeded" ? "Saved result retained"
     : item.context?.platform === "github_copilot" && sourceSaved(item)
       && ["execute", "replace"].includes(item.next_action) ? "Retry parsing the saved answer"
-    : ({execute: "Eligible for refetch", reconcile: "Check the previous attempt", reconcile_or_replace: "Check the previous attempt before refetch",
+    : ({execute: "Eligible for refetch", reconcile: "Check the previous attempt", reconcile_or_replace: "Check the previous attempt",
       replace: "Eligible for refetch", wait: "Wait for the current attempt", retain: "No refetch currently available"}[item.next_action] || humanize(item.next_action));
   // Older readouts without a plan ordinal still get a stable number within the
   // complete item set, before status grouping or search.

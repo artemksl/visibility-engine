@@ -17,7 +17,7 @@ SECRET_PATTERNS = (
 
 def candidates():
     if (ROOT / ".git").is_dir():
-        result = subprocess.check_output(["git", "ls-files", "-z"], cwd=ROOT)
+        result = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT)
         if result:
             return [ROOT / name.decode() for name in result.split(b"\0") if name]
     return [path for path in ROOT.rglob("*") if path.is_file()

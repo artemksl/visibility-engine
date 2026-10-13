@@ -19,6 +19,11 @@ class _AlreadyClear(Exception):
 
 
 def _capture_focus_return(expected_pid):
+    from platform_runtime.desktop import capture_focus_return
+    return capture_focus_return(expected_pid, mac_factory=_capture_mac_focus_return)
+
+
+def _capture_mac_focus_return(expected_pid):
     """Return to the prior app only if the user has not switched away.
 
     Capture and return occur under the same desktop lease. Never select an
@@ -43,13 +48,21 @@ class NativeVerificationSession:
     """Lazy, thread-affine AX reader/mouse session; never types or sends."""
 
     def __init__(self):
-        from axbridge.mouse import HumanMouse
+        from axbridge.mouse import HumanMouse, MotionConfig
         from axbridge.verification import CopilotVerificationAdapter
-        self.mouse = HumanMouse()
-        self.adapter = CopilotVerificationAdapter(mouse=self.mouse)
+        from platform_runtime.desktop import verification_components
+        # This guard includes live CDP/DOM identity and AX checkbox reads, not
+        # only a local pointer check. Keep the sampled pause unchanged and leave
+        # bounded time for that fresh proof immediately before button-down.
+        self.mouse, self.adapter, self._native_close = verification_components(
+            mouse_factory=HumanMouse, adapter_factory=CopilotVerificationAdapter,
+            config=MotionConfig(guard_budget=.5, settle_limits=(.05, .85)))
 
     def close(self):
-        self.mouse.__exit__(None, None, None)
+        try:
+            self.mouse.__exit__(None, None, None)
+        finally:
+            self._native_close()
 
     def cancel(self):
         self.mouse.cancel()
@@ -128,6 +141,7 @@ class CopilotVerificationService:
         native = []
         target = {}
         focus_return = []
+        guard_refusal = {}
         expected = submission.identity
         page = submission.page
         enqueued_url = str(page.url)
@@ -135,10 +149,14 @@ class CopilotVerificationService:
         pinned_conversation = (canonical(enqueued_url)
             if _is_conversation_url(enqueued_url, submission.spec) else None)
 
-        async def same_page(*, focus=False, native_url=None):
+        async def same_page(*, focus=False, native_url=None, diagnostic=None):
             nonlocal pinned_conversation
-            if stop.is_set() or submission.cancelled() or deadline.expired():
+            def refused(reason):
+                if diagnostic is not None:
+                    diagnostic["reason"] = reason
                 return False
+            if stop.is_set() or submission.cancelled() or deadline.expired():
+                return refused("cancelled" if stop.is_set() or submission.cancelled() else "episode_deadline")
             observed = await strict_page_identity(page, profile_id=expected.profile_id,
                 chrome_directory=expected.chrome_directory, _deadline=deadline)
             expected.assert_same_tab(observed)
@@ -148,19 +166,21 @@ class CopilotVerificationService:
                 if not (_is_blank_provider_start_url(expected.conversation_reference,
                         submission.spec.start_url, aliases=submission.spec.blank_start_url_aliases)
                         and _is_conversation_url(observed.conversation_reference, submission.spec)):
-                    return False
+                    return refused("conversation_changed")
             if pinned_conversation is not None and pinned_conversation != canonical(observed.conversation_reference):
-                return False
+                return refused("conversation_changed")
             checkpoint = submission._last_correlation_value
             if checkpoint is not None and canonical(checkpoint["identity"]["conversation_reference"]) != canonical(observed.conversation_reference):
-                return False
+                return refused("checkpoint_changed")
             if _is_conversation_url(observed.conversation_reference, submission.spec):
                 pinned_conversation = canonical(observed.conversation_reference)
             if native_url is not None and canonical(native_url) != canonical(observed.conversation_reference):
-                return False
-            return not focus or bool(await _await_call(page.evaluate,
+                return refused("native_url_changed")
+            if focus and not bool(await _await_call(page.evaluate,
                 "() => document.hasFocus() && document.visibilityState === 'visible'",
-                _deadline=deadline))
+                _deadline=deadline)):
+                return refused("tab_not_focused")
+            return True
 
         if self.background_only and not self.automatic_verification:
             # Playwright may inspect hidden tabs, but native verification needs
@@ -226,15 +246,35 @@ class CopilotVerificationService:
             self._event(submission, "active")
 
         def foreground_check(*, deadline, native_url=None):
-            remaining = min(expires, deadline) - time.monotonic()
+            started = time.monotonic()
+            remaining = min(expires, deadline) - started
+            diagnostic = {}
+            def refused(reason):
+                if not guard_refusal:
+                    guard_refusal.update(reason=reason,
+                        budget_ms=round(max(0., remaining) * 1000, 3),
+                        elapsed_ms=round((time.monotonic() - started) * 1000, 3))
+                return False
             if stop.is_set() or remaining <= 0:
-                return False
-            future = asyncio.run_coroutine_threadsafe(same_page(focus=True, native_url=native_url), loop)
+                return refused("cancelled" if stop.is_set() else "guard_deadline")
+            future = asyncio.run_coroutine_threadsafe(
+                same_page(focus=True, native_url=native_url, diagnostic=diagnostic), loop)
             try:
-                return future.result(timeout=remaining) is True
-            except (Exception, concurrent.futures.CancelledError):
+                if future.result(timeout=remaining) is True:
+                    return True
+                return refused(diagnostic.get("reason", "guard_refused"))
+            except concurrent.futures.TimeoutError:
                 future.cancel()
-                return False
+                return refused("guard_timeout")
+            except IdentityMismatchError:
+                future.cancel()
+                return refused("identity_changed")
+            except concurrent.futures.CancelledError:
+                future.cancel()
+                return refused("cancelled")
+            except Exception:
+                future.cancel()
+                return refused("guard_read_failed")
 
         def action(session):
             native.append(session)
@@ -264,7 +304,8 @@ class CopilotVerificationService:
                 prepare=prepare, action=action, timeout_s=deadline.remaining(), cancel_action=cancel_action)
             status = result.get("status") if isinstance(result, dict) else None
             if status not in {"clicked", "already_clear"}:
-                self._event(submission, "unsupported", reason=str(result.get("reason", "unknown"))[:160])
+                self._event(submission, "unsupported", reason=str(result.get("reason", "unknown"))[:160],
+                    **({"guard_refusal": dict(guard_refusal)} if guard_refusal else {}))
                 error = HumanVerificationRequiredError("Copilot verification has no supported accessible checkbox")
                 # Only an explicit backend result proves there was no press.
                 # Timeouts/exceptions and ambiguous input cannot take the

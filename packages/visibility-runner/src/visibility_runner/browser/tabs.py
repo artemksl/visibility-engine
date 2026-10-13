@@ -29,10 +29,7 @@ from .profile_matching import (
     browser_target_id,
 )
 
-try:  # Unix/macOS production path.
-    import fcntl
-except ImportError:  # pragma: no cover
-    fcntl = None
+from platform_runtime import file_locks as fcntl
 
 
 DEFAULT_POPUP_LOCK_PATH = (
@@ -453,8 +450,7 @@ def _acquire_popup_lock(path: Path) -> Optional[object]:
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = path.open("a+", encoding="utf-8")
     try:
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
         handle.close()
         if exc.errno in (errno.EACCES, errno.EAGAIN):
@@ -468,8 +464,7 @@ def _acquire_popup_lock(path: Path) -> Optional[object]:
 
 def _release_popup_lock(handle: object) -> None:
     try:
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     finally:
         handle.close()
 

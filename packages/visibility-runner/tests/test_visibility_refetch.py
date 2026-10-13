@@ -5,6 +5,7 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'src'))
 sys.path.insert(0,str(ROOT/'tests'))
 import pytest
+from dataclasses import replace
 from support.execution import FakeDriver, AnswerSpec, _runtime, _typed_plan
 from visibility_runner.config import Platform
 from visibility_runner.execution.manage_measurements import Runner
@@ -13,6 +14,8 @@ from visibility_runner.recovery.api import StaleRecoveryPreview
 
 def fixture(tmp_path):
     runtime,digest=_runtime(tmp_path)
+    runtime=replace(runtime, profiles=replace(runtime.profiles, lease_lock_root=tmp_path / "profile-locks"),
+                    browser=replace(runtime.browser, user_data_dir=tmp_path / "synthetic-user-data"))
     plan=_typed_plan(Platform.CHATGPT,run_id='refetch-original',manifest_sha256=digest)
     driver=FakeDriver('chatgpt',{plan.observation_ids[0]:(AnswerSpec('Alpha Clinic'),AnswerSpec('bad json'))})
     runner=Runner(runtime,providers={'chatgpt':driver})
@@ -751,7 +754,9 @@ def test_second_turn_recovery_validates_before_commit_or_unit_restart(tmp_path,r
             return Submission(self,observation_id,identity,self.answers[observation_id])
     runtime,digest=_runtime(tmp_path)
     policy=_policy()
-    runtime=replace(runtime,retry_policy=policy)
+    runtime=replace(runtime,retry_policy=policy,
+        profiles=replace(runtime.profiles, lease_lock_root=tmp_path / "profile-locks"),
+        browser=replace(runtime.browser, user_data_dir=tmp_path / "synthetic-user-data"))
     base=_typed_plan(Platform.CHATGPT,run_id='recover-second',manifest_sha256=digest)
     plan=retry_plan(Platform.CHATGPT,run_id=base.run_id,manifest_sha256=digest,profile=base.selected_profiles[0],retry_policy=policy)
     item_id=plan.observation_ids[0]

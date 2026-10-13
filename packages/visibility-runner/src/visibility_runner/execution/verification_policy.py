@@ -57,7 +57,7 @@ def enable(runner, run_id, *, request_id, request_sha256, plan=None, account_ema
     receipt = {**body, "policy_sha256": canonical_sha256(body)}
     path = runner.repository.run_dir(run_id) / "execution-history" / (owner.execution_id + ".verification-policy.json")
     if path.exists():
-        if json.loads(path.read_text()) != receipt:
+        if json.loads(path.read_text(encoding="utf-8")) != receipt:
             raise IntegrityError("verification_execution_policy_changed")
     else:
         publish_json(path, receipt, exclusive=True)
@@ -72,7 +72,7 @@ def effective_policy(runner, run_id):
     if selected is not None and owner is not None and selected[:2] == (run_id, owner.execution_id):
         owner.assert_owned()
         try:
-            observed = json.loads(selected[2].read_text())
+            observed = json.loads(selected[2].read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise IntegrityError("verification_execution_policy_unreadable") from exc
         if observed != selected[3]:

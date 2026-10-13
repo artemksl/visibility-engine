@@ -2,8 +2,10 @@
 import json
 import os
 from pathlib import Path
-import stat
 import tempfile
+from platform_runtime.security import is_owned_private, open_no_follow, protect_private
+from platform_runtime.security import private_directory as _private_directory
+from platform_runtime.storage import publish_complete
 
 MAX_JSON_BYTES = 8 * 1024 * 1024
 
@@ -22,11 +24,10 @@ def _unique(pairs):
 
 def read_json(path, limit=65536):
     """Metadata only. Reject links, loose permissions and concurrent replacements."""
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    fd = open_no_follow(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
     with os.fdopen(fd, "rb") as stream:
         before = os.fstat(stream.fileno())
-        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
-                or before.st_mode & 0o077 or before.st_nlink != 1
+        if (not is_owned_private(path, fd=stream.fileno()) or before.st_nlink != 1
                 or not 0 < before.st_size <= limit):
             raise ValueError()
         raw = stream.read(limit + 1)
@@ -39,13 +40,7 @@ def read_json(path, limit=65536):
                       parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
 
 def private_directory(path):
-    path = Path(path)
-    if path != path.resolve():
-        raise ValueError()
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    info = path.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-        raise ValueError()
+    _private_directory(path)
 
 def atomic_json(path, value, *, exclusive=False):
     raw = (json.dumps(value, ensure_ascii=True, separators=(",", ":")) + "\n").encode()
@@ -55,40 +50,27 @@ def atomic_json(path, value, *, exclusive=False):
     try:
         descriptor, temporary = tempfile.mkstemp(prefix=".registry-", dir=path.parent)
         with os.fdopen(descriptor, "wb") as stream:
+            protect_private(temporary)
             stream.write(raw)
             stream.flush()
             os.fsync(stream.fileno())
-        if exclusive:
-            os.link(temporary, path)
-            os.unlink(temporary)
-        else:
-            os.replace(temporary, path)
+        publish_complete(temporary, path, exclusive=exclusive)
         temporary = None
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
     finally:
-        if temporary is not None:
+        if temporary is not None and os.path.exists(temporary):
             os.unlink(temporary)
 
-import tempfile
 def _save(path: Path, data: dict) -> None:
     """Replace small non-secret metadata atomically and durably."""
     fd, temporary = tempfile.mkstemp(prefix=".binding-", dir=path.parent)
     try:
         with os.fdopen(fd, "w") as stream:
+            protect_private(temporary)
             json.dump(data, stream)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        parent = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(parent)
-        finally:
-            os.close(parent)
+        publish_complete(temporary, path)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)

@@ -37,6 +37,23 @@ def test_missing_configuration_has_no_default_selection(tmp_path):
     with pytest.raises(ValueError, match='settings'): load_settings(tmp_path)
 
 
+@pytest.mark.parametrize('selected', [[], None, 'profile_1', ['unknown'], ['profile_1', 'profile_1']])
+def test_test_request_rejects_invalid_profile_subsets(tmp_path, selected):
+    configure(tmp_path)
+    with pytest.raises(ValueError, match='configured profile'):
+        build_visibility_test_config('copilot', {
+            'request_id': 'test-profile-subset', 'selected_profile_ids': selected}, tmp_path)
+
+
+def test_test_request_cannot_expand_the_explicit_settings_pool(tmp_path):
+    configure(tmp_path)
+    settings = tmp_path / 'config/settings.json'
+    settings.write_text(json.dumps({'selected_profile_ids': ['profile_1']}))
+    with pytest.raises(ValueError, match='configured profile'):
+        build_visibility_test_config('copilot', {
+            'request_id': 'test-profile-expansion', 'selected_profile_ids': ['profile_2']}, tmp_path)
+
+
 def test_diagnostic_start_freezes_plan_without_running_a_provider(tmp_path, monkeypatch):
     configure(tmp_path)
     monkeypatch.setenv('PYTHONPATH', str(ROOT / 'panel/src'))
@@ -44,7 +61,9 @@ def test_diagnostic_start_freezes_plan_without_running_a_provider(tmp_path, monk
         command=[sys.executable, str(ROOT / 'scripts/run_visibility_measurement.py')])
     store = JobStore(tmp_path, workflows={workflow.id: workflow})
     monkeypatch.setattr(store, '_run_job', lambda *args: None)
-    config = build_visibility_test_config('chatgpt', {'request_id': 'test-request-123', 'prompts': ['Prompt A', 'Prompt A', 'Prompt B']}, tmp_path)
+    config = build_visibility_test_config('chatgpt', {
+        'request_id': 'test-request-123', 'prompts': ['Prompt A', 'Prompt A', 'Prompt B'],
+        'selected_profile_ids': ['profile_2']}, tmp_path)
     request_id = config.pop('request_id')
     first = store.start(workflow.id, config, request_id=request_id)
     second = store.start(workflow.id, config, request_id=request_id)
@@ -54,11 +73,17 @@ def test_diagnostic_start_freezes_plan_without_running_a_provider(tmp_path, monk
     runtime = json.loads((directory / 'runtime.json').read_text())
     measurement = json.loads((directory / 'measurement.json').read_text())
     assert measurement['diagnostic_prompts'] == ['Prompt A', 'Prompt A', 'Prompt B']
-    assert runtime['max_concurrency'] == 4
+    assert runtime['profiles']['selected_profile_ids'] == ['profile_2']
+    assert runtime['max_concurrency'] == 2
     assert runtime['tabs_per_provider'] == 2
     assert runtime['packet_start_stagger_seconds'] == 10
     assert runtime['retry_policy']['max_attempts'] == 2
     assert runtime['retry_policy']['response_timeouts']['chatgpt_turn_1_seconds'] == 240
+    from visibility_panel.web.start_receipts import StartRequestConflict
+    frozen_runtime = (directory / 'runtime.json').read_bytes()
+    with pytest.raises(StartRequestConflict):
+        store.start(workflow.id, {**config, 'selected_profile_ids': ['profile_1']}, request_id=request_id)
+    assert (directory / 'runtime.json').read_bytes() == frozen_runtime
     registry = WorkerRegistry(directory)
     start = registry.request(first.run_config['runner_execution_id'])
     assert 'auto_recovery_rounds' not in start['bindings']
@@ -107,12 +132,16 @@ def test_panel_load_and_preview_are_read_only(panel):
     base, store = panel
     assert fetch(base, '/health')[1] == {'ok': True}
     html = fetch(base, '/visibility-testing')[1]
-    assert 'visibilityTestForm' in html and 'Client research' not in html
+    assert 'visibilityTestForm' in html and 'visibilityTestProfileChoices' in html and 'Client research' not in html
     assert fetch(base, '/api/jobs?scope=visibility')[1]['jobs'][0]['id'] == 'run-a'
     preview = fetch(base, '/api/testing/visibility/chatgpt/preview', {'request_id': 'preview-request-123', 'prompt_count': 15})[1]
     assert preview['prompt_count'] == 15
     assert preview['selected_profile_ids'] == ['profile_1', 'profile_2']
     assert preview['provider_requests_sent'] == 0
+    preview = fetch(base, '/api/testing/visibility/copilot/preview', {
+        'request_id': 'preview-subset-123', 'prompt_count': 15, 'selected_profile_ids': ['profile_2']})[1]
+    assert preview['selected_profile_ids'] == ['profile_2']
+    assert preview['initial_request_counts'] == {'source': 15, 'extraction': 15, 'total': 30}
     assert store.calls == []
 
 
@@ -143,7 +172,9 @@ def test_public_bind_is_refused():
 
 
 def test_record_inspection_uses_the_frozen_custom_chrome_directory(tmp_path, monkeypatch):
+    from visibility_panel.web import record_navigation
     from visibility_panel.web.record_navigation import _browser_paths
+    monkeypatch.setattr(record_navigation, "chrome_binary", lambda: tmp_path / "synthetic-chrome")
     frozen = tmp_path / 'automation-chrome'
     monkeypatch.setenv('CHROME_USER_DATA_DIR', str(tmp_path / 'unrelated-chrome'))
     _, actual = _browser_paths(tmp_path, {'browser': {'user_data_dir': str(frozen)}})

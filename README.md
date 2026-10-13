@@ -13,14 +13,17 @@ and is never automatically resent.
 
 ## Install and open
 
-Use Python 3.12 or later. Browser startup and desktop verification currently
-support macOS with Google Chrome. The panel and offline tests also run on Linux;
-Windows is not supported by the current filesystem locks.
+Use Python 3.12 or later and Google Chrome. macOS and Windows use the same
+panel, runner, website adapters and recovery logic. A separate platform package
+supplies native browser startup, locking, storage and desktop operations.
 
 ```bash
 ./setup.sh --with-tests
 ./run.sh
 ```
+
+On Windows, run `setup.cmd --with-tests`, then `run.cmd`. Read
+[the platform notes](docs/platform-runtime.md) for the Windows validation status.
 
 Open <http://127.0.0.1:8766/visibility-testing>. To choose another port, use
 `./run.sh --port 8767`. Opening the panel and using Preview do not send prompts.
@@ -36,7 +39,8 @@ and troubleshooting. An installing agent should read [AGENTS.md](AGENTS.md) firs
 | `panel/` | Testing interface, local job control and guarded worker integration |
 | `packages/visibility-runner/` | Runner, scheduler, ownership, website adapters, evidence and recovery |
 | `packages/automation-core/` | Shared asynchronous action executor and organic pointer movement |
-| `packages/axbridge/` | Optional macOS accessibility bridge for Copilot verification |
+| `packages/platform-runtime/` | Isolated Windows/macOS mechanisms; no measurement policy |
+| `packages/axbridge/` | Shared optional verification and native mouse-movement algorithms |
 | `config/` | Browser launcher and fictional configuration examples |
 | `scripts/` | Worker launched by the panel |
 

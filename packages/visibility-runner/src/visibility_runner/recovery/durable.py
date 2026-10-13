@@ -11,39 +11,27 @@ execution heartbeat and the mutable progress projections.
 """
 from __future__ import annotations
 
-import errno
 import json
 import os
-import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
+from platform_runtime import storage
+
 
 def sync_file(fd: int) -> None:
     """Flush the file to the storage device itself (F_FULLFSYNC on macOS)."""
-    os.fsync(fd)
-    if sys.platform == "darwin":
-        import fcntl
-        # F_FULLFSYNC asks the device to flush its cache, beyond fsync.
-        fcntl.fcntl(fd, getattr(fcntl, "F_FULLFSYNC", 51))
+    storage.sync_file(fd, full=True)
 
 
 def sync_file_to_kernel(fd: int) -> None:
     """Ordinary fsync only; enough for files derived from fully synced records."""
-    os.fsync(fd)
+    storage.sync_file(fd, full=False)
 
 
 def sync_directory(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        try:
-            os.fsync(fd)
-        except OSError as exc:
-            if exc.errno not in {errno.EINVAL, errno.ENOTSUP}:
-                raise
-    finally:
-        os.close(fd)
+    storage.sync_directory(path)
 
 
 def publish_bytes(path: Path | str, data: bytes, *, exclusive: bool = False, full_sync: bool = True) -> Path:
@@ -59,13 +47,11 @@ def publish_bytes(path: Path | str, data: bytes, *, exclusive: bool = False, ful
                 sync_file(stream.fileno())
             else:
                 sync_file_to_kernel(stream.fileno())
-        if exclusive:
-            # The destination is never observable with incomplete contents.
-            os.link(temporary, path)
-            temporary.unlink()
-        else:
-            os.replace(temporary, path)
-        sync_directory(path.parent)
+        # The OS boundary preserves complete publication and no-overwrite.
+        storage.publish_complete(
+            temporary, path, exclusive=exclusive, durable=True,
+            directory_sync=sync_directory,
+        )
     finally:
         temporary.unlink(missing_ok=True)
     return path

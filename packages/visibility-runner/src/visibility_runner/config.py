@@ -20,6 +20,8 @@ from types import MappingProxyType
 from typing import Callable, Final, Optional
 from urllib.parse import urlsplit
 
+from platform_runtime.credentials import valid_store_reference
+
 from .errors import ConfigurationConflictError, ConfigurationError
 from .contract_primitives import (
     PLATFORM_ALIASES as _PLATFORM_ALIASES,
@@ -1005,11 +1007,13 @@ class GitHubCopilotRuntimeConfig:
     worker_path: Optional[str] = None
 
     def __post_init__(self) -> None:
+        store_reference = self.credential_ref
         for name in ("account_ref", "github_account_id", "credential_ref", "node_binary"):
             object.__setattr__(self, name, _clean(getattr(self, name), field_name=f"github_copilot.{name}"))
-        parts = self.credential_ref.split(":", 2)
-        if len(parts) != 3 or parts[0] != "keychain" or not all(parts[1:]):
-            raise ConfigurationError("github_copilot.credential_ref must be keychain:<service>:<account>")
+        if isinstance(store_reference, str) and store_reference.startswith("credential-manager:"):
+            object.__setattr__(self, "credential_ref", store_reference)
+        if not valid_store_reference(self.credential_ref):
+            raise ConfigurationError("github_copilot.credential_ref must be keychain:<service>:<account> or credential-manager:<target>")
         if self.worker_path is not None:
             object.__setattr__(self, "worker_path", str(_path(self.worker_path, field_name="github_copilot.worker_path")))
 

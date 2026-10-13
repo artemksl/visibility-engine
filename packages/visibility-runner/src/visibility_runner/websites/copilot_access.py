@@ -2,6 +2,36 @@
 from __future__ import annotations
 
 
+async def tooltip_only_dialog(item, *, deadline=None):
+    """Recognize a modal wrapper whose entire rendered content is one tooltip."""
+    from ..browser.operations import _await_call
+    evaluate = getattr(item, "evaluate", None)
+    if not callable(evaluate):
+        return False
+    return bool(await _await_call(evaluate, """root => {
+        const rendered = element => {
+            const box = element.getBoundingClientRect(), css = getComputedStyle(element);
+            return box.width > 0 && box.height > 0 && css.display !== 'none'
+                && css.visibility !== 'hidden' && css.visibility !== 'collapse';
+        };
+        const tooltips = Array.from(root.querySelectorAll('[role="tooltip"]')).filter(rendered);
+        if (tooltips.length !== 1) return false;
+        const tooltip = tooltips[0];
+        const controls = root.querySelectorAll('button, a[href], input, textarea, select, '
+            + '[role="button"], [role="link"], [role="textbox"], [contenteditable="true"], '
+            + 'iframe, img, svg, video, canvas');
+        if (Array.from(controls).some(node => rendered(node) && !tooltip.contains(node))) return false;
+        const texts = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        for (let node = texts.nextNode(); node; node = texts.nextNode()) {
+            if (!node.textContent.trim() || tooltip.contains(node) || !rendered(node.parentElement)) continue;
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            if (Array.from(range.getClientRects()).some(box => box.width > 0 && box.height > 0)) return false;
+        }
+        return true;
+    }""", _deadline=deadline))
+
+
 async def obstructed_composer(page, spec, *, deadline=None):
     from ..browser.operations import _await_call
     evaluate = getattr(page, "evaluate", None)

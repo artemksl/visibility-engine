@@ -13,10 +13,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Optional
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover
-    fcntl = None
+from platform_runtime import file_locks as fcntl
 
 from ..errors import (
     AlreadyExistsError,
@@ -74,6 +71,7 @@ class RunSession:
     recovery: Any = None
     startup_factory: Any = None
     startup_in_progress: bool = False
+    restart_authorization: Any = None
 
 
 def _observation_index(plan: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
@@ -119,6 +117,7 @@ class MeasurementFiles:
     def end_run_session(self, session: RunSession) -> None:
         if self._session is not session:
             raise StateTransitionError("storage_run_session_changed")
+        session.restart_authorization = None
         self._session = None
 
     @property
@@ -1168,13 +1167,13 @@ class MeasurementFiles:
         lock.parent.mkdir(parents=True, exist_ok=True)
         handle = lock.open("a+b")
         try:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             yield
         finally:
-            if fcntl is not None:
+            try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            handle.close()
+            finally:
+                handle.close()
 
 
 def _remove_new_tree(root: Path) -> None:

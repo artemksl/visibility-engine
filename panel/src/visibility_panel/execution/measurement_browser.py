@@ -101,13 +101,20 @@ def _selected_profile_rows(runtime: dict) -> list[dict]:
     return rows
 
 
+def _launcher_command(root: Path, *, platform: str | None = None) -> list[str]:
+    """Only Chrome launch mechanics vary; frozen startup policy stays shared."""
+    if (platform or sys.platform) == "win32":
+        return [sys.executable, str(root / "config" / "launch_logged_in.py")]
+    return ["/bin/bash", str(root / "config" / "launch_logged_in.sh")]
+
+
 def _restart_chrome(runtime: dict, *, root: Path, lease, prepare_restart=None, check_cancelled=lambda: None) -> None:
     rows = _selected_profile_rows(runtime)
     # Validate the trial setting before Chrome is closed.
     post_restart_wait = _post_restart_wait_seconds()
     directories = [row["chrome_directory"] for row in rows]
     endpoint = runtime["browser"]["cdp_url"]
-    launcher = root / "config" / "launch_logged_in.sh"
+    launcher_command = _launcher_command(root)
     environment = dict(os.environ)
     environment.update({LOCK_HELD_ENV: "1", LOCK_PATH_ENV: str(lease.path), "PYTHON": sys.executable})
     # Pass a verified private copy: the launcher must not use a broader catalog
@@ -120,7 +127,7 @@ def _restart_chrome(runtime: dict, *, root: Path, lease, prepare_restart=None, c
         with barrier if barrier is not None else nullcontext():
             check_cancelled()
             print("[browser] Closing Chrome and reopening selected profiles for measurement", flush=True)
-            command = ["/bin/bash", str(launcher), "--profiles-path", str(manifest), "--clean-start"]
+            command = [*launcher_command, "--profiles-path", str(manifest), "--clean-start"]
             if runtime["browser"].get("user_data_dir"):
                 command.extend(["--user-data-dir", str(runtime["browser"]["user_data_dir"])])
             command.extend(["--cdp-url", endpoint, "--force-close"])

@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "workspace-automation-core"
-version = "0.1.2"
+version = "0.1.3"
 description = "Shared browser automation, workflow storage and diagnostics"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["playwright>=1.40,<2"]
+dependencies = ["playwright>=1.40,<2", "workspace-platform-runtime==0.1.0"]
 
 [project.optional-dependencies]
 assets = ["Pillow>=10,<13"]

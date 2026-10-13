@@ -8,6 +8,8 @@ import json
 import os
 from pathlib import Path
 import stat
+from platform_runtime.security import is_owned_private, open_no_follow, protect_private
+from platform_runtime.storage import publish_complete, sync_path
 
 
 class LegacyStateBlocked(RuntimeError):
@@ -39,10 +41,8 @@ class LegacyStateGuard:
             if account.exists():
                 for path in account.iterdir():
                     if path == self.owned_transaction_journal:
-                        info = path.lstat()
                         if (path != account / "automation.sqlite3-journal"
-                                or not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-                                or info.st_mode & 0o077):
+                                or not is_owned_private(path)):
                             raise LegacyStateBlocked()
                         continue
                     if path.name!="automation.sqlite3" and (".sqlite" in path.name or path.suffix==".db") and not self._resolved(path):
@@ -50,7 +50,7 @@ class LegacyStateGuard:
             binding=self.root/"profiles"/hashlib.sha256(self.scope.profile_id.encode()).hexdigest()[:32]/"binding.json"
             if binding.exists() or binding.is_symlink():
                 if binding.is_symlink() or not stat.S_ISREG(binding.stat().st_mode): raise LegacyStateBlocked()
-                data=json.loads(binding.read_text())
+                data=json.loads(binding.read_text(encoding="utf-8"))
                 if (type(data) is not dict or data.get("version")!=1 or data.get("account_key")!=self.scope.account_key
                         or data.get("profile_id")!=self.scope.profile_id or data.get("status") not in ("ready","existing")):
                     raise LegacyStateBlocked()
@@ -81,7 +81,7 @@ def _source_records(path,scope,root):
         return value
     records=[]
     if path.name=="verification.json":
-        data=json.loads(path.read_text())
+        data=json.loads(path.read_text(encoding="utf-8"))
         if type(data) is not dict or data.get("version")!=1 or data.get("phase") not in {"request_intent","awaiting_message","submit_intent","callback_completed"}:
             raise LegacyStateBlocked()
         records.append(LegacyEvidence(**base,source_kind="verification_journal",source_record_id="journal:"+safe(data.get("run_id")),
@@ -144,6 +144,7 @@ def migrate_legacy_store(state_dir,scope,ownership,*,source_database=None,includ
     try:
         root,folder,target,marker_path=AccountMemory._paths(state_dir,scope,ownership)
         folder.mkdir(parents=True,exist_ok=True,mode=0o700)
+        protect_private(folder, directory=True)
         if marker_path.exists(): raise LegacyStateBlocked()
         source=Path(source_database).resolve() if source_database is not None else (target if target.exists() else None)
         if source is not None and (not source.is_relative_to(root) or not source.is_file()): raise LegacyStateBlocked()
@@ -170,7 +171,7 @@ def migrate_legacy_store(state_dir,scope,ownership,*,source_database=None,includ
                         sources=manifests,staged=staged.name,archive=archive.name if archive else None)
             _save(marker_path,marker)
             if fault_hook: fault_hook("after_migrating_marker")
-            descriptor=os.open(staged,os.O_CREAT|os.O_EXCL|os.O_RDWR|os.O_NOFOLLOW,0o600); os.close(descriptor)
+            descriptor=open_no_follow(staged,os.O_CREAT|os.O_EXCL|os.O_RDWR,0o600); os.close(descriptor)
             connection=AccountMemory._connect(staged)
             connection.execute("BEGIN IMMEDIATE"); connection.executescript(_SCHEMA); connection.execute("PRAGMA user_version=2")
             connection.execute("INSERT INTO operation_events(event_id,run_id,kind,utc_us,payload_json) VALUES (?,?,?,?,?)",
@@ -206,16 +207,11 @@ def migrate_legacy_store(state_dir,scope,ownership,*,source_database=None,includ
             validation._definitions={}; validation._thread=__import__("threading").get_ident(); validation._fault_hook=None
             try: validation._validate_database()
             finally: validation.close()
-            descriptor=os.open(staged,os.O_RDONLY)
-            try: os.fsync(descriptor)
-            finally: os.close(descriptor)
+            sync_path(staged)
             if archive is not None:
-                os.replace(source,archive)
+                publish_complete(source,archive)
                 if fault_hook: fault_hook("after_archive")
-            os.replace(staged,target)
-            descriptor=os.open(folder,os.O_RDONLY)
-            try: os.fsync(descriptor)
-            finally: os.close(descriptor)
+            publish_complete(staged,target)
             if fault_hook: fault_hook("after_publish")
             # Source/archive provenance remains in typed events. A migrating marker
             # carries repair paths until publication; ready has the strict runtime schema.
@@ -230,7 +226,7 @@ def migrate_legacy_store(state_dir,scope,ownership,*,source_database=None,includ
 
 
 def _migration_marker(root,scope,marker_path):
-    value=json.loads(marker_path.read_text())
+    value=json.loads(marker_path.read_text(encoding="utf-8"))
     if (type(value) is not dict or value.get("version")!=1 or value.get("schema_version")!=2 or value.get("state")!="migrating"
             or value.get("account_key")!=scope.account_key or value.get("database")!="automation.sqlite3"
             or type(value.get("sources")) not in (list,tuple)):
@@ -283,7 +279,7 @@ def repair_legacy_migration(state_dir,scope,ownership,*,action):
     try:
         root,folder,target,marker_path=AccountMemory._paths(state_dir,scope,ownership)
         AccountMemory._private_file(marker_path)
-        initial=json.loads(marker_path.read_text())
+        initial=json.loads(marker_path.read_text(encoding="utf-8"))
         if type(initial) is dict and initial.get("state")=="initializing":
             from automation_core.storage.memory import _MARKER_FIELDS,_id
             if (set(initial)!=_MARKER_FIELDS or initial.get("version")!=1 or initial.get("schema_version")!=2
@@ -299,14 +295,11 @@ def repair_legacy_migration(state_dir,scope,ownership,*,action):
                 aborted=folder/(".automation-aborted-"+initial["store_uuid"])
                 if aborted.exists(): raise LegacyStateBlocked()
                 aborted.mkdir(mode=0o700)
+                protect_private(aborted, directory=True)
                 if target.exists():
                     AccountMemory._private_file(target)
-                    os.replace(target,aborted/"target.sqlite3")
-                os.replace(marker_path,aborted/"initialization.json")
-                for directory in (aborted,folder):
-                    descriptor=os.open(directory,os.O_RDONLY)
-                    try: os.fsync(descriptor)
-                    finally: os.close(descriptor)
+                    publish_complete(target,aborted/"target.sqlite3")
+                publish_complete(marker_path,aborted/"initialization.json")
             return action
         marker=_migration_marker(root,scope,marker_path)
         staged=folder/marker["staged"]
@@ -328,12 +321,10 @@ def repair_legacy_migration(state_dir,scope,ownership,*,action):
                     imported=[record for record in records if list(record.evidence.source_identity)==source["identity"]]
                     if len(imported)!=source["record_count"]: raise LegacyStateBlocked()
                 if not target_is_import:
-                    if archive is not None and not archive.exists(): os.replace(target,archive)
+                    if archive is not None and not archive.exists(): publish_complete(target,archive)
                     elif target.exists(): raise LegacyStateBlocked()
-                    os.replace(staged,target)
-                descriptor=os.open(folder,os.O_RDONLY)
-                try: os.fsync(descriptor)
-                finally: os.close(descriptor)
+                    publish_complete(staged,target)
+                sync_path(target)
                 _save(marker_path,{key:marker[key] for key in ("version","schema_version","account_key","store_uuid","database")}|{"state":"ready"})
             else:
                 # These are failed target publications, not additional legacy
@@ -341,19 +332,16 @@ def repair_legacy_migration(state_dir,scope,ownership,*,action):
                 aborted=folder/(".automation-aborted-"+marker["store_uuid"])
                 if aborted.exists(): raise LegacyStateBlocked()
                 aborted.mkdir(mode=0o700)
+                protect_private(aborted, directory=True)
                 destinations=[]
                 if target_is_import: destinations.append((target,aborted/"target.sqlite3"))
                 if staged.exists(): destinations.append((staged,aborted/"stage.sqlite3"))
                 marker_archive=aborted/"migration.json"
-                for original,destination in destinations: os.replace(original,destination)
+                for original,destination in destinations: publish_complete(original,destination)
                 if archive is not None and archive.exists():
                     if target.exists(): raise LegacyStateBlocked()
-                    os.replace(archive,target)
-                os.replace(marker_path,marker_archive)
-                for directory in (aborted,folder):
-                    descriptor=os.open(directory,os.O_RDONLY)
-                    try: os.fsync(descriptor)
-                    finally: os.close(descriptor)
+                    publish_complete(archive,target)
+                publish_complete(marker_path,marker_archive)
             return action
     except LegacyStateBlocked: raise
     except Exception: raise StorageFailure() from None
@@ -370,7 +358,7 @@ def resolve_legacy_store(state_dir,scope,ownership,*,evidence_file):
     try:
         evidence_path=Path(evidence_file)
         if evidence_path.stat().st_size>codec.MAX_BYTES: raise LegacyStateBlocked()
-        evidence=codec.loads(evidence_path.read_text())
+        evidence=codec.loads(evidence_path.read_text(encoding="utf-8"))
         if type(evidence) is not tuple or not evidence or any(type(item) is not c.LegacyResolutionEvidence for item in evidence):
             raise LegacyStateBlocked()
         memory=AccountMemory.open(state_dir,scope,ownership)

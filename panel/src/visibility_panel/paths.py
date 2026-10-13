@@ -3,11 +3,29 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import sys
 
 
 def repo_root() -> Path:
     """Return the checked-out repository root."""
-    return Path(__file__).resolve().parents[3]
+    configured = os.environ.get("VISIBILITY_ENGINE_ROOT")
+    if configured:
+        root = Path(configured).expanduser()
+        if not root.is_absolute():
+            raise ValueError("VISIBILITY_ENGINE_ROOT must be an absolute checkout path")
+        return root.resolve()
+    module = Path(__file__).resolve()
+    source_root = module.parents[3]
+    if source_root / "panel" / "src" / "visibility_panel" == module.parent:
+        return source_root
+    # A normal installation lives under this checkout's dedicated environment,
+    # with different site-packages depths on Windows and macOS.
+    environment = Path(sys.prefix).resolve()
+    root = environment.parent
+    if environment.name == ".venv" and (root / "scripts" / "run_visibility_measurement.py").is_file():
+        return root
+    raise RuntimeError("Launch the panel with run.cmd or run.sh from its checkout")
 
 
 def repo_path(*parts: str) -> Path:

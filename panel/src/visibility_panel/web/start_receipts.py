@@ -8,7 +8,7 @@ second job. These records are independent of the in-memory web server.
 from __future__ import annotations
 
 import contextlib
-import fcntl
+from platform_runtime import file_locks as fcntl
 import hashlib
 import re
 from pathlib import Path

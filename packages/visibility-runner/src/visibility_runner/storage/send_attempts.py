@@ -12,10 +12,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Collection, Iterable, Iterator, Mapping, Optional
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows compatibility
-    fcntl = None
+from platform_runtime import file_locks as fcntl
 
 from ..errors import AmbiguousSendError, FenceConflictError, IntegrityError
 from ..gaio_evidence import (
@@ -1772,16 +1769,16 @@ class SendAttemptStore:
         lock_path = self.root / f".{text_sha256(fence_id)[:24]}.lock"
         handle = lock_path.open("a+b")
         try:
-            if fcntl is not None:
-                operation = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
-                fcntl.flock(handle.fileno(), operation)
+            operation = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+            fcntl.flock(handle.fileno(), operation)
             if not shared and self.ownership_guard is not None:
                 self.ownership_guard()
             yield
         finally:
-            if fcntl is not None:
+            try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            handle.close()
+            finally:
+                handle.close()
 
 
 __all__ = [

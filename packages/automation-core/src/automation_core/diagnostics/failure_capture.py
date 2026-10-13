@@ -13,6 +13,7 @@ from automation_core.paths import workspace_root
 import threading
 import time
 from uuid import uuid4
+from platform_runtime.security import open_no_follow, protect_private
 
 
 HTML_SAMPLE = """element => ({html: (document.doctype ?
@@ -28,9 +29,10 @@ def default_failure_directory():
 def _write(path, value):
     data = value.encode('utf-8') if isinstance(value, str) else json.dumps(value, indent=2, ensure_ascii=False).encode('utf-8')
     temporary = path.with_name('.' + path.name + '-' + uuid4().hex)
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    fd = open_no_follow(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, 'wb') as stream:
+            protect_private(temporary)
             stream.write(data)
         os.replace(temporary, path)
     finally:
@@ -41,7 +43,7 @@ def _directory(path):
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     if path.resolve() != path.absolute() or path.is_symlink() or not path.is_dir():
         raise OSError('unsafe_capture_directory')
-    os.chmod(path, 0o700)
+    protect_private(path, directory=True)
 
 
 class CaptureError(RuntimeError):
@@ -253,7 +255,7 @@ class FailureCapture:
         for folder in self._bundles:
             try:
                 path = folder / 'failure.json'
-                record = json.loads(path.read_text())
+                record = json.loads(path.read_text(encoding="utf-8"))
                 record['video'] = result
                 _write(path, record)
             except Exception:

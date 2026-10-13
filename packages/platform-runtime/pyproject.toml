@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "workspace-platform-runtime"
+version = "0.1.0"
+description = "Operating-system primitives shared by the visibility engine"
+requires-python = ">=3.12"
+dependencies = ["psutil>=7,<8", "pywin32>=308; sys_platform == 'win32'"]
+
+[project.optional-dependencies]
+desktop = ["pywinauto>=0.6.8,<0.7; sys_platform == 'win32'"]
+test = ["pytest>=8,<10"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["native_process: offline tests using real local processes"]

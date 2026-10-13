@@ -12,7 +12,7 @@ import uuid
 from collections import OrderedDict, deque
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable, Mapping, Optional
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from ..browser.input import (
     ComposerPreSendFailure,
@@ -79,7 +79,6 @@ from .page_readers import (
     visible_text_values,
     visible_text_values_within_latest_response,
     first_visible,
-    locator_count,
     visible_answer_snapshot,
     _response_content_text,
     last_visible_text,
@@ -98,6 +97,7 @@ _OWNED_TAB_REFERENCE_PREFIX = "visibility-runner-owned-tab:"
 # Shared with the execution supervisor: these are separate provider phases,
 # each with its own existing browser deadline.
 PROVIDER_PREPARATION_TIMEOUT_SECONDS = 30.0
+RECOVERY_INSPECTION_TIMEOUT_SECONDS = 5.0
 # Budget for preparing a message in a chat that already holds an answer
 # (``same_chat_turn_2``) or a long source-bound prompt (the Google AI Overview
 # parser message): reading the whole conversation back and the exact write
@@ -359,7 +359,6 @@ class PageSubmission:
         self._native_retry_prepared = False
         self._native_retry_sent = False
         self._prompt = ""
-        self._before_answer_count = 0
         self._before_answer_text = ""
         self._response_baseline: Optional[ResponseBaseline] = None
         self._logical_response_baseline: Optional[ResponseBaseline] = None
@@ -388,6 +387,10 @@ class PageSubmission:
 
     def failure_transport_snapshot(self):
         return self._failure_transport.snapshot() if self._failure_transport is not None else None
+
+    async def failure_transcript_snapshot(self, *, deadline: float):
+        return await _read_conversation(self.page, self.spec,
+            _deadline=_BrowserOperationDeadline(deadline, "failure transcript capture timed out"))
 
     def usage_limit_snapshot(self):
         return dict(self._usage_limit) if self._usage_limit is not None else None
@@ -421,19 +424,11 @@ class PageSubmission:
     CORRELATION_URL_POLL_SECONDS = 0.1
     CORRELATION_HISTORY_INTERVAL_SECONDS = 2.0
 
-    async def _checkpoint_conversation(self, *, read_history: bool = True) -> None:
-        if self._correlation_checkpoint is None or self._response_baseline is None:
-            return
-        try:
-            url = canonical_conversation_url(getattr(self.page, "url", None), self.spec.conversation_url_prefixes)
-        except ConversationCorrespondenceError:
-            return
-        if self._last_correlation_value is not None and self._last_correlation_value["identity"]["conversation_reference"] != url:
-            raise IdentityMismatchError("conversation changed during correlation checkpoint")
-        # This records observed correlation, not acceptance. The pre-send
-        # identity already bound this exact page/target to the admitted effect.
-        identity = replace(self._identity, conversation_reference=url)
+    def _conversation_binding(self, identity: BrowserIdentity) -> dict[str, object]:
+        """Bind an admitted logical turn independently of durable publication."""
         baseline = self._response_baseline
+        if baseline is None:
+            raise BrowserInteractionError("conversation response baseline is unavailable")
         logical = self._logical_response_baseline or baseline
         transcript = {
             "prior_user_sha256": list(self._history_before.get("user_sha256", ())),
@@ -442,24 +437,46 @@ class PageSubmission:
             "assistant_ids": list(self._history_before.get("assistant_ids", ())),
             "branch_id": self._history_before.get("branch_id"),
         }
-        if self._last_correlation_value is not None:
-            transcript.update(self._last_correlation_value["transcript"])
+        saved = self._last_correlation_value or self._recovery_binding
+        if saved is not None:
+            transcript.update(saved["transcript"])
         value = {"schema_version": "browser-conversation-binding-v1", "identity": identity.to_mapping(),
                  "prompt_sha256": _text_sha256(self._prompt), "expected_turn": logical.visible_response_count + 1,
                  "response_baseline": baseline.to_mapping(), "transcript": transcript}
         if self._logical_response_baseline is not None:
             value["logical_response_baseline"] = logical.to_mapping()
+        return value
+
+    async def _checkpoint_conversation(self, *, read_history: bool = True,
+            history: Optional[Mapping[str, object]] = None,
+            _deadline: Optional[_BrowserOperationDeadline] = None) -> None:
+        if self._correlation_checkpoint is None or self._response_baseline is None:
+            return
+        try:
+            url = canonical_conversation_url(getattr(self.page, "url", None), self.spec.conversation_url_prefixes)
+        except ConversationCorrespondenceError:
+            return
+        if self._last_correlation_value is not None and self._last_correlation_value["identity"]["conversation_reference"] != url:
+            raise IdentityMismatchError("conversation changed during correlation checkpoint")
+        # The URL is observed correlation. Acceptance separately proves the
+        # admitted prompt and history, even when no durable writer is attached.
+        identity = replace(self._identity, conversation_reference=url)
+        value = self._conversation_binding(identity)
+        transcript = value["transcript"]
+        logical = self._logical_response_baseline or self._response_baseline
         first_publication = self._last_correlation_payload is None
         await self._publish_correlation(value)
-        if not read_history and not first_publication:
+        if history is None and not read_history and not first_publication:
             return
         # Enrich the early URL checkpoint with message/branch identity as soon
         # as the UI exposes it. A history read cannot delay the first write.
         self._last_history_read_monotonic = time.monotonic()
-        try:
-            history = await _conversation_history(self.page, self.spec, _deadline=_BrowserOperationDeadline.after(2, timeout_message="conversation checkpoint history timed out"))
-        except (BrowserInteractionError, TimeoutError, AttributeError):
-            return
+        if history is None:
+            try:
+                history = await _conversation_history(self.page, self.spec,
+                    _deadline=_deadline or _BrowserOperationDeadline.after(2, timeout_message="conversation checkpoint history timed out"))
+            except (BrowserInteractionError, TimeoutError, AttributeError):
+                return
         for key in ("user_ids", "assistant_ids"):
             prior, current = list(transcript.get(key) or ()), list(history.get(key) or ())
             if key == "assistant_ids" and not self._native_answer_captured:
@@ -519,7 +536,6 @@ class PageSubmission:
             if "logical_response_baseline" in binding else None
         )
         self._native_retry_sent = self._logical_response_baseline is not None
-        self._before_answer_count = baseline.visible_response_count
         self._before_answer_text = ""
         rebound = getattr(self, "_restart_recovery_binding", None)
         self._recovery_binding = dict(rebound[1] if rebound is not None and rebound[0] == binding else binding)
@@ -578,19 +594,29 @@ class PageSubmission:
         )
         budget = self.preparation_timeout_seconds(prompt, timeout_seconds)
         deadline = _BrowserOperationDeadline.after(budget, timeout_message="provider preparation timed out")
+        self._preparation_phase = "access"
+        self._preparation_input_failure = None
         for attempt in range(3):
             try:
                 await _await_call(self._prepare_exact, prompt, on_pre_send_failure=on_pre_send_failure,
                     operation_deadline=deadline, _deadline=deadline)
                 return
             except Exception as error:
-                if (attempt == 2 or deadline.expired() or getattr(error, "access_blocker_handled", False)
-                        or not self._handles_access_blockers()):
-                    raise
-                marker = await _visible_access_block_marker(self.page, self.spec, _deadline=deadline)
-                if marker is None:
-                    raise
-                await self._assert_access_available(_deadline=deadline)
+                if (attempt < 2 and not deadline.expired()
+                        and not getattr(error, "access_blocker_handled", False)
+                        and self._handles_access_blockers()):
+                    marker = await _visible_access_block_marker(self.page, self.spec, _deadline=deadline)
+                    optional_notice = (self.spec.optional_notice_dismiss_selectors
+                        and await visible_items(self.page, self.spec.optional_notice_dismiss_selectors,
+                            _deadline=deadline))
+                    if marker is not None or optional_notice:
+                        await self._assert_access_available(_deadline=deadline)
+                        continue
+                if isinstance(error, TimeoutError):
+                    detail = self._preparation_input_failure
+                    raise TimeoutError(f"{error} during {self._preparation_phase}"
+                        + (f"; last input failure: {detail}" if detail else "")) from error
+                raise
 
     async def _prepare_exact(self, prompt: str, *, on_pre_send_failure=None, operation_deadline=None) -> None:
         if self._submitted:
@@ -609,15 +635,21 @@ class PageSubmission:
         self._native_retry_prepared = False
         self._native_retry_sent = False
         self._prompt = ""
-        self._before_answer_count = 0
         self._before_answer_text = ""
         self._response_baseline = None
         self._confirmed_failure_signature = None
         await self._assert_access_available(_deadline=operation_deadline if self._handles_access_blockers() else None)
         operation_deadline = operation_deadline or _BrowserOperationDeadline.after(
             self.preparation_timeout_seconds(prompt), timeout_message="provider preparation timed out")
-        composer = await self._first_action_with_access(self.spec.composer_selectors,
-            timeout_ms=20_000, deadline=operation_deadline)
+        self._preparation_phase = "dismiss composer obstruction"
+        obstruction_closed = await self._dismiss_composer_obstruction(operation_deadline)
+        self._preparation_phase = "find composer"
+        composer = (await self._restore_canonical_composer_view(operation_deadline)
+            if obstruction_closed else None)
+        if composer is None:
+            composer = await self._first_action_with_access(self.spec.composer_selectors,
+                timeout_ms=20_000, deadline=operation_deadline)
+        self._preparation_phase = "retain composer"
         composer_target = await self._actions.retain(composer, operation_deadline.expires_at)
         self._composer_target = composer_target
         last_access_probe = 0.
@@ -645,15 +677,26 @@ class PageSubmission:
             return True
 
         async def clear_value(_target):
-            await self._actions.clear(composer_target, operation_deadline.expires_at, verify_preparation)
+            self._preparation_phase = "clear composer"
+            try:
+                await self._actions.clear(composer_target, operation_deadline.expires_at, verify_preparation)
+            except Exception as error:
+                self._preparation_input_failure = f"clear: {type(error).__name__}: {error}"
+                raise
 
         async def write_value(_target, value):
-            await self._actions.write(composer_target, value, operation_deadline.expires_at,
-                verify_preparation, sequential=self.spec.type_composer_input,
-                min_delay_ms=self.spec.composer_typing_min_delay_ms if self.spec.type_composer_input else 0.,
-                max_delay_ms=self.spec.composer_typing_max_delay_ms if self.spec.type_composer_input else 0.)
+            self._preparation_phase = "write composer"
+            try:
+                await self._actions.write(composer_target, value, operation_deadline.expires_at,
+                    verify_preparation, sequential=self.spec.type_composer_input,
+                    min_delay_ms=self.spec.composer_typing_min_delay_ms if self.spec.type_composer_input else 0.,
+                    max_delay_ms=self.spec.composer_typing_max_delay_ms if self.spec.type_composer_input else 0.)
+            except Exception as error:
+                self._preparation_input_failure = f"write: {type(error).__name__}: {error}"
+                raise
 
         async def read_value(target):
+            self._preparation_phase = "read composer"
             await self._actions.validate(composer_target, operation_deadline.expires_at)
             reader = read_copilot_composer_value if self.spec.copilot_lexical_readback else read_typed_composer_value
             return await _await_call(reader, target, _deadline=operation_deadline)
@@ -664,11 +707,13 @@ class PageSubmission:
             send_started=lambda: self._submitted,
             record_failure=on_pre_send_failure,
             clear=clear_value, write=write_value, read=read_value,
+            clear_before_write=self.spec.type_composer_input,
         )
         # A wall may have appeared while typing. Recheck before the trial click.
         if self._handles_access_blockers():
             await self._assert_access_available(_deadline=operation_deadline)
         try:
+            self._preparation_phase = "find Send"
             control = await self._first_action_with_access(self.spec.send_selectors,
                 timeout_ms=4_000, deadline=operation_deadline)
         except TimeoutError:
@@ -681,6 +726,7 @@ class PageSubmission:
                     "provider send control is not clickable"
                 )
             try:
+                self._preparation_phase = "Send trial"
                 await _await_call(lambda: click(trial=True,
                     timeout=max(1, min(4_000, int(operation_deadline.remaining() * 1000)))),
                     _deadline=operation_deadline)
@@ -693,11 +739,13 @@ class PageSubmission:
             self._send_target = await self._actions.retain(control, operation_deadline.expires_at)
         self._composer = composer
         self._prompt = prompt
+        self._preparation_phase = "answer baseline"
         await self._capture_pre_send_answer(_deadline=operation_deadline)
         self._prepared = True
 
     def _handles_access_blockers(self):
-        return callable(getattr(self.human_verification_handler, "resolve", None))
+        return bool(self.spec.cookie_reject_selectors or self.spec.optional_notice_dismiss_selectors) or callable(
+            getattr(self.human_verification_handler, "resolve", None))
 
     async def _first_action_with_access(self, selectors, *, timeout_ms, deadline):
         """Resolve one action locator without promoting an arbitrary nth node."""
@@ -717,43 +765,19 @@ class PageSubmission:
             deadline.raise_expired()
         raise TimeoutError("provider action control did not become available")
 
-    async def _first_visible_with_access(self, selectors, *, timeout_ms, deadline=None):
-        if not self._handles_access_blockers():
-            return await first_visible(self.page, selectors, timeout_ms=timeout_ms)
-        deadline = deadline or _BrowserOperationDeadline.after(timeout_ms / 1000,
-            timeout_message="Copilot controls did not become available")
-        expires = time.monotonic() + timeout_ms / 1000
-        while not deadline.expired() and time.monotonic() < expires:
-            await self._assert_access_available(_deadline=deadline)
-            items = await visible_items(self.page, selectors, _deadline=deadline)
-            if items:
-                return items[0]
-            await asyncio.sleep(min(.2, max(0, deadline.remaining())))
-        raise TimeoutError("Copilot controls did not become available")
-
     async def _capture_pre_send_answer(
         self,
         *,
         _deadline: Optional[_BrowserOperationDeadline] = None,
     ) -> None:
-        snapshot = await visible_answer_snapshot(
-            self.page,
-            self.spec.response_node_selectors or self.spec.answer_selectors,
-            label_selectors=self.spec.rendered_answer_label_selectors,
-            content_selectors=self.spec.response_content_selectors,
-            collapse_nested=self.spec.collapse_nested_message_aliases,
-            turn_owner_selector=self.spec.current_turn_owner_selector,
-            _deadline=_deadline,
-        )
-        if _deadline is not None and _deadline.expired():
-            _deadline.raise_expired()
-        self._before_answer_count = snapshot.count
-        self._before_answer_text = snapshot.text
-        self._response_baseline = ResponseBaseline.from_snapshot(snapshot)
-        if snapshot.count:
-            self._history_before = await _conversation_history(self.page, self.spec, _deadline=_deadline or _BrowserOperationDeadline.after(10, timeout_message="conversation baseline history timed out"))
-        else:
-            self._history_before = {"user_sha256": (), "assistant_sha256": (), "user_ids": (), "assistant_ids": ()}
+        deadline = _deadline or _BrowserOperationDeadline.after(10,
+            timeout_message="conversation baseline history timed out")
+        conversation = await _read_conversation(self.page, self.spec, _deadline=deadline)
+        if deadline.expired():
+            deadline.raise_expired()
+        self._before_answer_text = conversation.answer.text
+        self._response_baseline = ResponseBaseline.from_snapshot(conversation.answer)
+        self._history_before = conversation.history
 
     async def _assert_access_available(
         self,
@@ -768,6 +792,7 @@ class PageSubmission:
             or self.spec.unauthenticated_control_selectors
             or self.spec.other_blocker_selectors
             or self.spec.cookie_notice_selectors
+            or self.spec.optional_notice_dismiss_selectors
         ):
             return
         deadline = _deadline or _BrowserOperationDeadline.after(
@@ -787,13 +812,136 @@ class PageSubmission:
             if callable(gate) and await gate(self, deadline):
                 marker = await _visible_access_block_marker(self.page, self.spec, _deadline=deadline)
         if marker is not None:
-            if self._handles_access_blockers():
+            if marker == "cookie_notice" and self.spec.cookie_reject_selectors:
+                await self._reject_optional_cookies(deadline)
+                await self._assert_access_available(_deadline=deadline)
+                return
+            if callable(getattr(self.human_verification_handler, "resolve", None)):
                 await self.human_verification_handler.resolve(self, marker, deadline)
                 return
             if marker == "human_verification_required" and self.human_verification_handler is not None:
                 await self._resolve_human_verification(deadline)
                 return
             raise _access_block_error(self.spec.platform, marker)
+        if self.spec.optional_notice_dismiss_selectors:
+            controls = await visible_items(self.page, self.spec.optional_notice_dismiss_selectors,
+                _deadline=deadline)
+            if len(controls) > 1:
+                raise BrowserInteractionError("optional notice dismissal control is not unique")
+            if controls:
+                await self._dismiss_known_notice(controls[0], controls[0], deadline,
+                    reason="optional notice")
+
+    async def _dismiss_composer_obstruction(self, deadline) -> bool:
+        """Close one adapter-owned panel only when it hides the input."""
+        if not self.spec.composer_obstruction_close_selectors:
+            return False
+        if await visible_items(self.page, self.spec.composer_selectors, _deadline=deadline):
+            return False
+        controls = await visible_items(self.page, self.spec.composer_obstruction_close_selectors,
+            _deadline=deadline)
+        if not controls:
+            return False
+        if len(controls) != 1:
+            raise BrowserInteractionError("composer obstruction close control is not unique")
+        reference = _canonical_reference(str(self.page.url), self.spec)
+        control = controls[0]
+        target = await self._actions.retain(control, deadline.expires_at)
+
+        async def verify(until):
+            if _canonical_reference(str(self.page.url), self.spec) != reference:
+                raise IdentityMismatchError("provider conversation changed during panel dismissal")
+            if await visible_items(self.page, self.spec.composer_selectors, _deadline=deadline):
+                raise BrowserInteractionError("composer obstruction is no longer blocking input")
+            return True
+
+        await self._actions.click(target, deadline.expires_at, verify)
+        while await _await_call(control.is_visible, _deadline=deadline):
+            if self.cancelled():
+                raise BrowserInteractionError("composer obstruction dismissal was cancelled")
+            await asyncio.sleep(min(.05, max(0., deadline.remaining())))
+        return True
+
+    async def _restore_canonical_composer_view(self, deadline) -> Optional[object]:
+        """Leave one closed, broken view without changing its completed chat."""
+        binding = self._previous_turn_binding
+        query_parameters = self.spec.composer_obstruction_view_query_parameters
+        if (self._submitted or self._require_fresh_blank_start or binding is None
+                or not any(key in query_parameters and value
+                    for key, value in parse_qsl(urlsplit(str(self.page.url)).query))):
+            return None
+        if await visible_items(self.page, self.spec.composer_selectors, _deadline=deadline):
+            return None
+        self._preparation_phase = "restore conversation view"
+        if self.cancelled():
+            raise BrowserInteractionError("conversation view restoration was cancelled")
+        saved = BrowserIdentity.from_mapping(binding["identity"])
+        observed = await strict_page_identity(self.page, profile_id=self.profile_id,
+            chrome_directory=self.chrome_directory, _deadline=deadline)
+        saved.assert_same_tab(observed, require_same_conversation=True,
+            canonical=lambda ref: _canonical_reference(ref, self.spec))
+        url = canonical_conversation_url(saved.conversation_reference,
+            self.spec.conversation_url_prefixes)
+        await _await_call(self._actions.release_all, _deadline=deadline)
+        if self.cancelled():
+            raise BrowserInteractionError("conversation view restoration was cancelled")
+        await _await_call(self.page.goto, url, wait_until="domcontentloaded",
+            timeout=max(1, int(deadline.remaining() * 1000)), _deadline=deadline)
+        composer = await self._first_action_with_access(self.spec.composer_selectors,
+            timeout_ms=20_000, deadline=deadline)
+        required_turns = logical_response_baseline(binding)["visible_response_count"] + 1
+        self._preparation_phase = "verify restored conversation"
+        while True:
+            if self.cancelled():
+                raise BrowserInteractionError("conversation view restoration was cancelled")
+            observed = await strict_page_identity(self.page, profile_id=self.profile_id,
+                chrome_directory=self.chrome_directory, _deadline=deadline)
+            saved.assert_same_tab(observed, require_same_conversation=True,
+                canonical=lambda ref: _canonical_reference(ref, self.spec))
+            history = await _conversation_history(self.page, self.spec, _deadline=deadline)
+            if (history.get("history_complete") is True
+                    and len(history.get("user_sha256", ())) >= required_turns
+                    and len(history.get("assistant_sha256", ())) >= required_turns):
+                proof = verify_conversation_history(binding,
+                    {"identity": observed.to_mapping(), "transcript": history},
+                    prefixes=self.spec.conversation_url_prefixes,
+                    prompt_sha256=binding["prompt_sha256"],
+                    expected_profile_id=self.profile_id,
+                    expected_chrome_directory=self.chrome_directory,
+                    temporary_message_id_prefixes=self.spec.temporary_message_id_prefixes)
+                if proof["response_present"] and not proof["generating"]:
+                    self._identity = observed
+                    return composer
+            await _await_call(asyncio.sleep, min(.1, max(0., deadline.remaining())), _deadline=deadline)
+
+    async def _reject_optional_cookies(self, deadline) -> None:
+        """Dismiss the adapter's known notice once, without touching a send."""
+        notices = await visible_items(self.page, self.spec.cookie_notice_selectors, _deadline=deadline)
+        controls = await visible_items(self.page, self.spec.cookie_reject_selectors, _deadline=deadline)
+        if len(notices) != 1 or len(controls) != 1:
+            raise _access_block_error(self.spec.platform, "cookie_notice")
+        await self._dismiss_known_notice(controls[0], notices[0], deadline,
+            reason="cookie")
+
+    async def _dismiss_known_notice(self, control, notice, deadline, *, reason) -> None:
+        """Dismiss one retained known notice and observe that it disappeared."""
+        reference = _canonical_reference(str(self.page.url), self.spec)
+        target = await self._actions.retain(control, deadline.expires_at)
+
+        async def verify(until):
+            if _canonical_reference(str(self.page.url), self.spec) != reference:
+                raise IdentityMismatchError(f"provider route changed during {reason} dismissal")
+            if not await _await_call(notice.is_visible, _deadline=deadline):
+                if reason == "cookie":
+                    raise _access_block_error(self.spec.platform, "cookie_notice")
+                raise BrowserInteractionError(f"{reason} notice changed before dismissal")
+            return True
+
+        await self._actions.click(target, deadline.expires_at, verify)
+        while await _await_call(notice.is_visible, _deadline=deadline):
+            if self.cancelled():
+                raise BrowserInteractionError(f"{reason} dismissal was cancelled")
+            await asyncio.sleep(min(.05, max(0., deadline.remaining())))
 
     async def _resolve_human_verification(self, deadline) -> None:
         try:
@@ -869,13 +1017,7 @@ class PageSubmission:
             timeout_message="provider pre-send identity check timed out",
         )
         self._dispatch_deadline = deadline
-        if self._handles_access_blockers():
-            await self._assert_access_available(_deadline=deadline)
-        elif _is_authentication_url(
-            getattr(self.page, "url", ""),
-            self.spec.authentication_url_prefixes,
-        ):
-            raise _access_block_error(self.spec.platform, "authentication_redirect")
+        await self._assert_access_available(_deadline=deadline)
         observed = await strict_page_identity(
             self.page,
             profile_id=self.profile_id,
@@ -900,7 +1042,6 @@ class PageSubmission:
                 require_same_conversation=True,
                 canonical=lambda ref: _canonical_reference(ref, self.spec),
             )
-        await self._assert_access_available(_deadline=deadline)
         self._identity = observed
 
     async def _verify_shared_send(self, until: float) -> bool:
@@ -1048,8 +1189,9 @@ class PageSubmission:
                     _cancel_background_browser_operation(task)
                     raise self._correlation_error
             answer = await task
-            self._native_answer_captured = True
-            await self._checkpoint_conversation()
+            if not self._native_answer_captured:
+                self._native_answer_captured = True
+                await self._checkpoint_conversation()
             if self._correlation_error is not None:
                 raise self._correlation_error
             return answer
@@ -1069,31 +1211,110 @@ class PageSubmission:
                 f"{self.spec.platform} response did not settle"
             ),
         )
-        text = await wait_for_stable_answer(
-            self.page,
-            self.spec,
-            before_count=self._before_answer_count,
-            before_answer=self._before_answer_text,
-            expected_prompt=self._prompt,
-            cancelled=self.cancelled,
-            allow_same_node_replacement=self._native_retry_sent,
-            _deadline=deadline,
-            resolve_human_verification=(self._resolve_human_verification
-                if self.human_verification_handler is not None else None),
-            resolve_access_blocker=(self._assert_access_available
-                if self._handles_access_blockers() else None),
-            usage_limit_observer=self._record_usage_limit,
-        )
-        observed = await strict_page_identity(
-            self.page,
-            profile_id=self.profile_id,
-            chrome_directory=self.chrome_directory,
-            _deadline=deadline,
-        )
-        if not self._accept_live_identity(observed):
-            raise IdentityMismatchError(
-                "provider identity changed before response capture"
+        if self.spec.platform == "copilot" and self._require_fresh_blank_start:
+            # Copilot can rebuild rendered text while assigning its first URL.
+            # Bind that route before measuring answer stability, under the same
+            # sent-turn deadline and ownership guards.
+            while _is_blank_provider_start_url(str(self.page.url), self.spec.start_url,
+                    aliases=self.spec.blank_start_url_aliases):
+                if not _is_blank_provider_start_url(self._identity.conversation_reference,
+                        self.spec.start_url, aliases=self.spec.blank_start_url_aliases):
+                    raise IdentityMismatchError("provider conversation changed before response capture")
+                if self.cancelled():
+                    raise BrowserInteractionError("Copilot conversation binding wait was cancelled")
+                await self._actions.assert_owned(deadline.expires_at)
+                await self._assert_access_available(_deadline=deadline)
+                await _await_call(asyncio.sleep, min(.1, max(0., deadline.remaining())), _deadline=deadline)
+        if self._response_baseline is None:
+            raise BrowserInteractionError("cannot await a provider turn without its response baseline")
+        while True:
+            text = await wait_for_stable_answer(
+                self.page,
+                self.spec,
+                before_count=self._response_baseline.visible_response_count,
+                before_answer=self._before_answer_text,
+                expected_prompt=self._prompt,
+                cancelled=self.cancelled,
+                allow_same_node_replacement=self._native_retry_sent,
+                _deadline=deadline,
+                resolve_human_verification=(self._resolve_human_verification
+                    if self.human_verification_handler is not None else None),
+                resolve_access_blocker=(self._assert_access_available
+                    if self._handles_access_blockers() else None),
+                usage_limit_observer=self._record_usage_limit,
             )
+            observed = await strict_page_identity(
+                self.page,
+                profile_id=self.profile_id,
+                chrome_directory=self.chrome_directory,
+                _deadline=deadline,
+            )
+            if not self._accept_live_identity(observed):
+                raise IdentityMismatchError("provider identity changed before response capture")
+            if self.spec.platform != "gemini":
+                break
+            if _is_blank_provider_start_url(observed.conversation_reference,
+                    self.spec.start_url, aliases=self.spec.blank_start_url_aliases):
+                await _await_call(asyncio.sleep, min(.1, max(0., deadline.remaining())), _deadline=deadline)
+                continue
+            # Lightweight polling finds a candidate. One coherent transcript
+            # read proves the exact admitted turn before accepting that text.
+            try:
+                conversation = await _read_conversation(self.page, self.spec, _deadline=deadline)
+            except Exception as error:
+                if not _is_native_playwright_timeout(error):
+                    raise
+                await _await_call(asyncio.sleep, min(.05, max(0., deadline.remaining())), _deadline=deadline)
+                continue
+            try:
+                correspondence = verify_conversation_history(self._conversation_binding(observed),
+                    {"identity": observed.to_mapping(), "transcript": conversation.history},
+                    prefixes=self.spec.conversation_url_prefixes,
+                    prompt_sha256=_text_sha256(self._prompt),
+                    expected_profile_id=self.profile_id,
+                    expected_chrome_directory=self.chrome_directory,
+                    temporary_message_id_prefixes=self.spec.temporary_message_id_prefixes)
+            except ConversationCorrespondenceError as error:
+                raise IdentityMismatchError(f"Gemini completed turn could not be correlated: {error}") from error
+            retry_unchanged = (self._native_retry_sent
+                and conversation.answer.count == self._response_baseline.visible_response_count
+                and _text_sha256(conversation.answer.text) == self._response_baseline.newest_response_sha256)
+            if (not correspondence["response_present"] or correspondence["generating"]
+                    or conversation.answer.text != text or retry_unchanged):
+                # The candidate changed while it was read. Continue under the
+                # original deadline; no new send or renewed budget is allowed.
+                await _await_call(asyncio.sleep, min(.05, max(0., deadline.remaining())), _deadline=deadline)
+                continue
+            self._identity.assert_same_tab(await strict_page_identity(self.page,
+                profile_id=self.profile_id, chrome_directory=self.chrome_directory,
+                _deadline=deadline), require_same_conversation=True,
+                canonical=lambda ref: _canonical_reference(ref, self.spec))
+            self._native_answer_captured = True
+            await self._checkpoint_conversation(history=conversation.history, _deadline=deadline)
+            break
+        if self.spec.platform == "copilot" and self._require_fresh_blank_start:
+            history = await _conversation_history(self.page, self.spec, _deadline=deadline)
+            if (history.get("history_complete") is not True or history.get("generating")
+                    or history.get("history_ambiguous") or history.get("branch_changed")
+                    or list(history.get("user_sha256", ())) != [
+                        *self._history_before.get("user_sha256", ()), _text_sha256(self._prompt)]
+                    or list(history.get("assistant_sha256", ())) != [
+                        *self._history_before.get("assistant_sha256", ()), _text_sha256(text)]):
+                raise IdentityMismatchError("Copilot completed source history changed before binding")
+            self._native_answer_captured = True
+            await _await_call(self._checkpoint_conversation, _deadline=deadline)
+            if self._last_correlation_value is not None:
+                verify_conversation_history(self._last_correlation_value,
+                    {"identity": observed.to_mapping(), "transcript": history},
+                    prefixes=self.spec.conversation_url_prefixes,
+                    prompt_sha256=_text_sha256(self._prompt),
+                    expected_profile_id=self.profile_id,
+                    expected_chrome_directory=self.chrome_directory,
+                    temporary_message_id_prefixes=self.spec.temporary_message_id_prefixes)
+            self._identity.assert_same_tab(await strict_page_identity(self.page,
+                profile_id=self.profile_id, chrome_directory=self.chrome_directory,
+                _deadline=deadline), require_same_conversation=True,
+                canonical=lambda ref: _canonical_reference(ref, self.spec))
         return ProviderAnswer(
             status=ProviderStatus.COLLECTED,
             text=text,
@@ -1121,8 +1342,12 @@ class PageSubmission:
                 (),
             )
 
+        immediate = grace == 0
+        # Zero wait still permits reading the existing turn. It permits no
+        # generation polling; two immediate probes share one bounded deadline.
         deadline = _BrowserOperationDeadline.after(
-            grace,
+            min(RECOVERY_INSPECTION_TIMEOUT_SECONDS, self._current_response_timeout_seconds)
+            if immediate else grace,
             timeout_message=(
                 f"{self.spec.platform} reconciliation did not settle"
             ),
@@ -1135,7 +1360,7 @@ class PageSubmission:
         minimum_checks = 2
 
         while True:
-            if deadline.expired() and len(checks) >= minimum_checks:
+            if (immediate or deadline.expired()) and len(checks) >= minimum_checks:
                 break
             try:
                 probe = await self._reconciliation_probe(
@@ -1245,8 +1470,10 @@ class PageSubmission:
                 terminal_signature = None
                 consecutive_terminal_checks = 0
 
-            if deadline.expired() and len(checks) >= minimum_checks:
+            if (immediate or deadline.expired()) and len(checks) >= minimum_checks:
                 break
+            if immediate:
+                continue
             remaining = max(0.0, deadline.remaining())
             await asyncio.sleep(min(0.25, remaining) if remaining else 0)
 
@@ -1430,7 +1657,6 @@ class PageSubmission:
                 response_baseline=response_baseline, binding=binding)
         self._prompt = prompt_text
         self._response_baseline = baseline
-        self._before_answer_count = baseline.visible_response_count
         self._before_answer_text = ""
         self._confirmed_failure_signature = classification
         self._native_retry_sent = bool(native_retry)
@@ -1468,6 +1694,12 @@ class PageSubmission:
             snapshot = conversation.answer
             response_scope = conversation.response_scope
             busy = correspondence["generating"]
+        elif self.spec.platform in {"copilot", "gemini"}:
+            conversation = await _read_conversation(self.page, self.spec, _deadline=_deadline)
+            prompt_text = conversation.prompt_text
+            snapshot = conversation.answer
+            response_scope = conversation.response_scope
+            busy = bool(conversation.history.get("generating"))
         else:
             prompt_text = await last_visible_text(
                 self.page,
@@ -1482,6 +1714,7 @@ class PageSubmission:
                 self.spec.response_node_selectors or self.spec.answer_selectors,
                 label_selectors=self.spec.rendered_answer_label_selectors,
                 content_selectors=self.spec.response_content_selectors,
+                decoration_selectors=self.spec.response_content_decoration_selectors,
                 collapse_nested=self.spec.collapse_nested_message_aliases,
                 turn_owner_selector=self.spec.current_turn_owner_selector,
                 _scope=response_scope,
@@ -1702,7 +1935,6 @@ class PageSubmission:
         self._native_retry_prepared = False
         self._native_retry_sent = False
         self._prompt = ""
-        self._before_answer_count = 0
         self._before_answer_text = ""
         self._response_baseline = None
         self._logical_response_baseline = None
@@ -1845,24 +2077,30 @@ class PageProvider:
             cancelled=self.cancelled, require_fresh_blank_start=fresh,
             human_verification_handler=self.human_verification_handler,
         )
-        if submission._handles_access_blockers():
-            if fresh:
-                submission._identity = replace(identity, conversation_reference=self.spec.start_url)
-            await submission._assert_access_available(_deadline=deadline)
-            identity = await strict_page_identity(page, profile_id=profile_id,
-                chrome_directory=chrome_directory, _deadline=deadline)
-            submission._identity = identity
-        if fresh and not _is_blank_provider_start_url(
-            identity.conversation_reference,
-            self.spec.start_url,
-            aliases=self.spec.blank_start_url_aliases,
-        ):
-            raise IdentityMismatchError(
-                f"{self.platform} fresh chat did not remain on the blank "
-                "provider start before send: expected "
-                f"{_provider_url_diagnostic(self.spec.start_url)}, observed "
-                f"{_provider_url_diagnostic(identity.conversation_reference)}"
-            )
+        try:
+            if submission._handles_access_blockers():
+                if fresh:
+                    submission._identity = replace(identity, conversation_reference=self.spec.start_url)
+                await submission._assert_access_available(_deadline=deadline)
+                identity = await strict_page_identity(page, profile_id=profile_id,
+                    chrome_directory=chrome_directory, _deadline=deadline)
+                submission._identity = identity
+            if fresh and not _is_blank_provider_start_url(
+                identity.conversation_reference,
+                self.spec.start_url,
+                aliases=self.spec.blank_start_url_aliases,
+            ):
+                raise IdentityMismatchError(
+                    f"{self.platform} fresh chat did not remain on the blank "
+                    "provider start before send: expected "
+                    f"{_provider_url_diagnostic(self.spec.start_url)}, observed "
+                    f"{_provider_url_diagnostic(identity.conversation_reference)}"
+                )
+        except Exception as error:
+            # The worker has no returned submission yet. Keep the original
+            # owned page available only for its existing private failure sampler.
+            error._visibility_open_submission = submission
+            raise
         return submission
 
     async def restore(
@@ -1939,9 +2177,11 @@ class PageProvider:
                 raise ConversationCorrespondenceError("conversation_profile_mismatch")
             effective_binding = binding
             if observed.browser_context_reference != identity.browser_context_reference:
-                permitted = getattr(self.page_factory, "_restart_profiles", frozenset())
+                authorize = getattr(self.page_factory, "_authorize_restarted_context", None)
                 if (not identity.browser_context_reference or not observed.browser_context_reference
-                        or (identity.profile_id, identity.chrome_directory) not in permitted):
+                        or not callable(authorize)
+                        or not authorize(observed.profile_id, observed.chrome_directory,
+                                         observed.browser_context_reference)):
                     raise ConversationCorrespondenceError("conversation_account_context_mismatch")
                 # Only the verified owned-profile factory after explicit restart
                 # may replace a process-local context. Keep the saved evidence
@@ -1966,6 +2206,9 @@ class PageProvider:
                 if self.cancelled():
                     raise BrowserInteractionError("original conversation reopening was cancelled")
                 observed = await strict_page_identity(page, profile_id=identity.profile_id, chrome_directory=identity.chrome_directory, _deadline=deadline)
+                if effective_binding is not binding and not authorize(
+                        observed.profile_id, observed.chrome_directory, observed.browser_context_reference):
+                    raise ConversationCorrespondenceError("conversation_account_context_mismatch")
                 history = await _conversation_history(page, self.spec, _deadline=deadline)
                 try:
                     verify_conversation_history(effective_binding, {"identity": observed.to_mapping(), "transcript": history},
@@ -2284,6 +2527,7 @@ async def wait_for_stable_answer(
                 spec.response_node_selectors or spec.answer_selectors,
                 label_selectors=spec.rendered_answer_label_selectors,
                 content_selectors=spec.response_content_selectors,
+                decoration_selectors=spec.response_content_decoration_selectors,
                 collapse_nested=spec.collapse_nested_message_aliases,
                 turn_owner_selector=spec.current_turn_owner_selector,
                 _scope=response_scope,
